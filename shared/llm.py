@@ -135,9 +135,13 @@ class LLMClient:
                 if error.status_code == 429 or error.status_code >= 500:
                     last_error = error
                 else:
+                    log.warning("LLM non-retryable API error %d: %s", error.status_code, error.message)
                     raise LLMError(f"non-retryable API error {error.status_code}: {error.message}") from error
             except anthropic.APIConnectionError as error:  # includes timeouts
                 last_error = error
+            except anthropic.APIError as error:
+                log.warning("LLM unexpected API error: %r", error)
+                raise LLMError(f"unexpected API error: {error!r}") from error
             else:
                 usage = response.usage
                 return LLMResult(
@@ -157,6 +161,8 @@ class LLMClient:
 def _check_stop_reason(response) -> None:
     # Retrying these would give the same answer again, so they fail immediately.
     if response.stop_reason == "refusal":
+        log.warning("LLM model refused the request")
         raise LLMError("model refused the request")
     if response.stop_reason == "max_tokens":
+        log.warning("LLM response hit max_tokens")
         raise LLMError("response hit max_tokens; raise the limit")

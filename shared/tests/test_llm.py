@@ -116,3 +116,26 @@ def test_text_with_fallbacks_and_effort_uses_beta_endpoint():
 def test_empty_text_is_retried():
     client, fake, _ = make_client([fake_response(text=""), fake_response(text="ok")])
     assert client.text(model="claude-sonnet-5-5", system="s", user="u").attempts == 2
+
+
+import anthropic
+import httpx2
+
+_REQUEST = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+
+
+def test_api_response_validation_error_is_not_retried():
+    response = httpx2.Response(200, request=_REQUEST)
+    error = anthropic.APIResponseValidationError(response=response, body=None)
+    client, fake, sleeps = make_client([error])
+    with pytest.raises(LLMError):
+        parse_once(client)
+    assert len(fake.messages.calls) == 1
+    assert sleeps == []
+
+
+def test_non_retryable_failure_emits_warning_log(caplog):
+    client, fake, _ = make_client([api_error(400)])
+    with pytest.raises(LLMError):
+        parse_once(client)
+    assert any("non-retryable API error 400" in record.message for record in caplog.records)
