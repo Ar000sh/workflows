@@ -8,8 +8,16 @@ import re
 
 from lead_responder.practice import Practice
 
-# Amount before the currency ("80 €", "80 Euro") or currency before the amount ("€ 99", "EUR 20").
-_PRICE = re.compile(r"\d[\d.,]*\s?(€|eur\b|euro\b)|(€|\beur\b|\beuro\b)\s?\d", re.IGNORECASE)
+# Matches prices in various formats:
+#   Amount-first: "80 €", "80,- €", "80 Euros", "ca. 80 Euro"
+#   Currency-first: "€ 99", "EUR80", "Eur. 80", "EUR 20"
+# Word boundaries and lack of currency markers prevent false positives on dates, URLs, and words like "Europa".
+_PRICE = re.compile(
+    r"\d[\d.,]*(,-)?[\s]*(€|eur\b|euros?\b)"  # Amount-first: "80 €", "80,- €", "80 Euros"
+    r"|"
+    r"(€\s?|\beur\.?\s?|\beuros?\s?)\d",  # Currency-first: "€ 80", "EUR80", "Eur. 80"
+    re.IGNORECASE
+)
 
 DIAGNOSIS_TERMS = (
     "diagnose", "diagnosis",

@@ -19,10 +19,15 @@ def test_doctolib_not_required(practice):
     assert check("Hallo, bis bald!", practice, require_doctolib=False, emergency=False) == []
 
 
-@pytest.mark.parametrize("price", ["150 €", "ca. 80 Euro", "€ 99", "EUR 20", "1.200,50€"])
+@pytest.mark.parametrize("price", ["150 €", "ca. 80 Euro", "€ 99", "EUR 20", "1.200,50€", "ab 80,- €", "80,- Euro", "EUR80", "Eur. 80", "80 Euros"])
 def test_prices_are_flagged(practice, price):
     violations = check(f"Das kostet {price}.", practice, require_doctolib=False, emergency=False)
     assert violations == ["mentions a price"]
+
+
+@pytest.mark.parametrize("text", ["Termin am 12.10. um 10 Uhr", "Europa", "um 10 Uhr", "https://www.doctolib.de/zahnarztpraxis/hannover/brightsmile-demo", "Zahn 36"])
+def test_normal_text_is_not_a_price(practice, text):
+    assert check(text, practice, require_doctolib=False, emergency=False) == []
 
 
 def test_dates_are_not_prices(practice):
