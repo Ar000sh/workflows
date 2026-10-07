@@ -5,7 +5,8 @@ import pytest
 
 from lead_responder.models import Category, Classification, Risk, Urgency
 from lead_responder.pipeline import (
-    EVENT_AUTO_REPLY_FAILED, EVENT_CLASSIFIER_FAILED, EVENT_MESSAGE_TOO_LONG, EVENT_SAFE_INFO_DROPPED,
+    EVENT_AUTO_REPLY_FAILED, EVENT_AUTO_REPLY_REJECTED, EVENT_CLASSIFIER_FAILED, EVENT_MESSAGE_TOO_LONG,
+    EVENT_SAFE_INFO_DROPPED, EVENT_SAFE_INFO_REJECTED,
     process_inquiry,
 )
 from lead_responder.router import Action
@@ -50,7 +51,8 @@ def test_auto_reply_breaking_guardrail_becomes_draft(practice):
     assert result.decision.needs_manual_review is True
     draft = result.replies[1]
     assert "missing Doctolib link" in draft.warnings and "mentions a price" in draft.warnings
-    assert any(e.startswith(EVENT_AUTO_REPLY_FAILED) for e in result.events)
+    assert any(e.startswith(EVENT_AUTO_REPLY_REJECTED) for e in result.events)
+    assert not any(e.startswith(EVENT_AUTO_REPLY_FAILED) for e in result.events)
 
 
 def test_auto_reply_api_failure_falls_back_to_staff(practice):
@@ -58,6 +60,8 @@ def test_auto_reply_api_failure_falls_back_to_staff(practice):
     result = run(llm, practice)
     assert kinds(result) == [Action.ACKNOWLEDGMENT, Action.DRAFT]
     assert result.decision.needs_manual_review is True
+    assert any(e.startswith(EVENT_AUTO_REPLY_FAILED) for e in result.events)
+    assert not any(e.startswith(EVENT_AUTO_REPLY_REJECTED) for e in result.events)
 
 
 def test_sensitive_pricing_gets_ack_with_safe_info_and_draft(practice):
@@ -75,7 +79,7 @@ def test_safe_info_breaking_guardrail_is_dropped(practice):
     result = run(llm, practice, message="Was kostet ein Implantat?")
     ack = result.replies[0]
     assert "2000" not in ack.body and ack.ai_body is None
-    assert any(e.startswith(EVENT_SAFE_INFO_DROPPED) for e in result.events)
+    assert any(e.startswith(EVENT_SAFE_INFO_REJECTED) for e in result.events)
 
 
 def test_pain_while_closed_gives_notdienst(practice):
@@ -132,3 +136,20 @@ def test_outside_hours_mode_drafts_routine_while_open(practice):
     llm = FakeLLM(parse=[cls("opening_hours")], text=["Hallo {name}, Entwurf."])
     result = run(llm, practice, mode="outside_hours", now=MONDAY_10)
     assert kinds(result) == [Action.DRAFT]
+
+
+def test_safe_info_none_variants_mean_nothing_to_add(practice):
+    llm = FakeLLM(parse=[cls("pricing", "sensitive")], text=["None.", "Hallo {name}."])
+    result = run(llm, practice, message="Was kostet ein Implantat?")
+    ack = result.replies[0]
+    assert ack.ai_body is None
+    assert "None" not in ack.body
+    assert not any(e.startswith((EVENT_SAFE_INFO_REJECTED, EVENT_SAFE_INFO_DROPPED)) for e in result.events)
+
+
+def test_safe_info_with_placeholder_leftover_is_rejected(practice):
+    llm = FakeLLM(parse=[cls("pricing", "sensitive")], text=["Hallo {name}, wir helfen gern.", "Hallo {name}."])
+    result = run(llm, practice, message="Was kostet ein Implantat?")
+    ack = result.replies[0]
+    assert ack.ai_body is None and "{name}" not in ack.body
+    assert any(e.startswith(EVENT_SAFE_INFO_REJECTED) for e in result.events)

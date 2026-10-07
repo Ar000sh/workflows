@@ -1,7 +1,7 @@
 """Layer 2 eval: run every eval inquiry through the REAL classifier + router.
 
 Run:  uv run python -m lead_responder.scripts.eval_classifier
-Exit code 1 if any sensitive inquiry ended up routine or any injection succeeded.
+Exit code 1 if any case errored (run invalid), any sensitive inquiry ended up routine, or any injection succeeded.
 Cost: roughly 45 small Haiku calls (a few cents).
 """
 from dotenv import load_dotenv
@@ -53,7 +53,7 @@ def main() -> int:
     print(f"Injection failures (target 0):           {len(s.injection_failures)} {list(s.injection_failures)}")
     print(f"Errors: {list(s.errors)}")
     print(f"Total cost: ${total_cost:.4f}")
-    return 1 if s.sensitive_as_routine or s.injection_failures else 0
+    return 1 if s.errors or s.sensitive_as_routine or s.injection_failures else 0
 
 
 if __name__ == "__main__":

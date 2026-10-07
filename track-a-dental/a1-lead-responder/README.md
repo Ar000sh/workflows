@@ -15,6 +15,8 @@ cp .env.example .env        # Git Bash; in PowerShell/cmd use: copy .env.example
 ```
 
 ## Run
+Run all commands from the repo root.
+
 | What | Command |
 |---|---|
 | Unit tests (no API calls) | `uv run pytest` |
@@ -27,8 +29,11 @@ cp .env.example .env        # Git Bash; in PowerShell/cmd use: copy .env.example
 1. **Redact** emails and phone numbers → only the message text goes to Claude.
 2. **Classify** (Haiku, structured output) → category, risk, urgency, language.
 3. **Route** (plain Python) → auto-reply, or acknowledgment + staff draft.
-4. **Write** texts (Sonnet) from `data/faq.md`; acknowledgments are fixed templates.
+4. **Write** texts (Sonnet) from `data/faq.md`; acknowledgments are fixed templates plus an optional AI safe-info paragraph (guardrail-checked).
 5. **Guardrails** check every AI text; a failing auto-reply goes to staff instead.
+
+## Known limitation
+A refusal or `max_tokens` stop on the classifier's structured-output path is retried (up to 4 attempts) before falling back to human review.
 
 ## Eval results
 **Not run yet — needs ANTHROPIC_API_KEY.** No live numbers exist so far.

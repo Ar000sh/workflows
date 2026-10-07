@@ -144,12 +144,15 @@ class LLMClient:
                 raise LLMError(f"unexpected API error: {error!r}") from error
             else:
                 usage = response.usage
+                cost = cost_usd(response.model, usage.input_tokens, usage.output_tokens)
+                if cost is None:
+                    log.warning("LLM cost unknown for served model %r (no price entry)", response.model)
                 return LLMResult(
                     value=value,
                     model=response.model,
                     input_tokens=usage.input_tokens,
                     output_tokens=usage.output_tokens,
-                    cost_usd=cost_usd(response.model, usage.input_tokens, usage.output_tokens),
+                    cost_usd=cost,
                     attempts=attempt,
                 )
             log.warning("LLM attempt %d/%d failed: %r", attempt, attempts, last_error)

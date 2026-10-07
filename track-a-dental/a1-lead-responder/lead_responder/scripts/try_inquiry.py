@@ -28,7 +28,12 @@ def main() -> None:
 
     practice = load_practice()
     tz = ZoneInfo(practice.timezone)
-    now = datetime.fromisoformat(args.at).replace(tzinfo=tz) if args.at else datetime.now(tz)
+    if args.at:
+        now = datetime.fromisoformat(args.at)
+        if now.tzinfo is None:  # an explicit offset in --at is respected
+            now = now.replace(tzinfo=tz)
+    else:
+        now = datetime.now(tz)
 
     result = process_inquiry(llm=LLMClient(), practice=practice, faq=load_faq(),
                              name=args.name, message=args.message, now=now)

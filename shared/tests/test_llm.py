@@ -139,3 +139,10 @@ def test_non_retryable_failure_emits_warning_log(caplog):
     with pytest.raises(LLMError):
         parse_once(client)
     assert any("non-retryable API error 400" in record.message for record in caplog.records)
+
+
+def test_unknown_cost_for_served_model_emits_warning(caplog):
+    client, _, _ = make_client([fake_response(parsed=Answer(ok=True), model="mystery-model-1")])
+    result = parse_once(client)
+    assert result.cost_usd is None
+    assert any("cost" in r.message and "mystery-model-1" in r.message for r in caplog.records)

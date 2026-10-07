@@ -15,9 +15,9 @@ _MIN_PHONE_DIGITS = 7
 # Patterns to preserve before phone redaction (dates and times with optional spaces around separators)
 _DATE_PATTERNS = [
     # d.m.yyyy or d.m.yy with optional spaces around dots
-    re.compile(r"\d{1,2}\s*\.\s*\d{1,2}\s*\.\s*\d{2,4}"),
+    re.compile(r"(?<![\d.])\d{1,2}\s*\.\s*\d{1,2}\s*\.\s*\d{2,4}(?![\d.])"),
     # yyyy.m.d format
-    re.compile(r"\d{4}\s*\.\s*\d{1,2}\s*\.\s*\d{1,2}"),
+    re.compile(r"(?<![\d.])\d{4}\s*\.\s*\d{1,2}\s*\.\s*\d{1,2}(?![\d.])"),
 ]
 _TIME_PATTERN = re.compile(r"\d{1,2}:\d{2}")
 

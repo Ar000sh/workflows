@@ -41,3 +41,7 @@ def test_keeps_realistic_dates(date_text):
 def test_redacts_phone_with_leading_paren():
     """Leading paren of area code should be consumed, no unbalanced bracket."""
     assert redact("Tel (0511) 123456") == "Tel [PHONE]"
+
+
+def test_redacts_dotted_phone_that_looks_like_a_date():
+    assert redact("Tel 0511.12.34.56") == "Tel [PHONE]"

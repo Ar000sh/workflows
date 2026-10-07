@@ -2,7 +2,8 @@
 
 Run:  uv run python -m lead_responder.scripts.eval_drafter
 Writes all generated texts to eval_runs/drafts-<timestamp>.md for reading by hand.
-Exit code 1 if any auto-reply broke a guardrail (it was then sent to staff instead).
+Exit code 1 if the run is not valid: any classifier failure, API error while drafting, auto-reply or
+safe-info paragraph rejected by guardrails, or no auto-reply produced at all.
 Cost: about 45 classifier calls + 45–90 Sonnet calls (well under $1).
 """
 from dotenv import load_dotenv
@@ -16,8 +17,12 @@ from zoneinfo import ZoneInfo  # noqa: E402
 
 from lead_responder.drafter import load_faq  # noqa: E402
 from lead_responder.evals import load_cases  # noqa: E402
-from lead_responder.pipeline import EVENT_AUTO_REPLY_FAILED, EVENT_SAFE_INFO_DROPPED, process_inquiry  # noqa: E402
+from lead_responder.pipeline import (  # noqa: E402
+    EVENT_AUTO_REPLY_FAILED, EVENT_AUTO_REPLY_REJECTED, EVENT_CLASSIFIER_FAILED, EVENT_DRAFT_FAILED,
+    EVENT_SAFE_INFO_DROPPED, EVENT_SAFE_INFO_REJECTED, process_inquiry,
+)
 from lead_responder.practice import load_practice  # noqa: E402
+from lead_responder.router import Action  # noqa: E402
 from shared.llm import LLMClient  # noqa: E402
 
 NOW = datetime(2026, 10, 5, 10, 0, tzinfo=ZoneInfo("Europe/Berlin"))  # Monday, practice open
@@ -28,15 +33,29 @@ def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8")
     llm, practice, faq = LLMClient(), load_practice(), load_faq()
     report = [f"# Drafter eval {datetime.now():%Y-%m-%d %H:%M}\n"]
-    downgraded, dropped, total_cost = [], [], 0.0
+    buckets = {name: [] for name in
+               ("classifier_failed", "api_errors", "auto_rejected", "safe_rejected", "auto_produced")}
+    total_cost = 0.0
 
     for case in load_cases():
-        result = process_inquiry(llm=llm, practice=practice, faq=faq, name="Alex", message=case.message, now=NOW)
+        # "always" so a .env AUTO_REPLY_MODE cannot turn the guardrail gate into a no-op.
+        result = process_inquiry(llm=llm, practice=practice, faq=faq, name="Alex", message=case.message,
+                                 now=NOW, auto_reply_mode="always")
         total_cost += result.cost_usd
-        if any(e.startswith(EVENT_AUTO_REPLY_FAILED) for e in result.events):
-            downgraded.append(case.id)
-        if any(e.startswith(EVENT_SAFE_INFO_DROPPED) for e in result.events):
-            dropped.append(case.id)
+
+        def has(*prefixes):
+            return any(e.startswith(prefixes) for e in result.events)
+
+        if has(EVENT_CLASSIFIER_FAILED):
+            buckets["classifier_failed"].append(case.id)
+        if has(EVENT_AUTO_REPLY_FAILED, EVENT_SAFE_INFO_DROPPED, EVENT_DRAFT_FAILED):
+            buckets["api_errors"].append(case.id)
+        if has(EVENT_AUTO_REPLY_REJECTED):
+            buckets["auto_rejected"].append(case.id)
+        if has(EVENT_SAFE_INFO_REJECTED):
+            buckets["safe_rejected"].append(case.id)
+        if any(r.kind is Action.AUTO_REPLY for r in result.replies):
+            buckets["auto_produced"].append(case.id)
         report.append(f"## {case.id} — expected {case.expected_category}/{case.expected_risk}\n")
         report.append(f"> {case.message}\n")
         d = result.decision
@@ -52,11 +71,19 @@ def main() -> int:
     path = OUT_DIR / f"drafts-{datetime.now():%Y%m%d-%H%M}.md"
     path.write_text("\n".join(report), encoding="utf-8")
 
-    print(f"\nAuto-replies that broke a guardrail (target 0): {len(downgraded)} {downgraded}")
-    print(f"Safe-info paragraphs dropped by guardrails:     {len(dropped)} {dropped}")
+     produced = len(buckets["auto_produced"])
+    valid = not (buckets["classifier_failed"] or buckets["api_errors"] or buckets["auto_rejected"]
+                 or buckets["safe_rejected"]) and produced > 0
+    print(f"
+Run valid: {'yes' if valid else 'NO - results cannot be trusted'}")
+    print(f"Auto-replies produced (must be > 0):             {produced}")
+    print(f"Classifier failures (target 0):                  {len(buckets['classifier_failed'])} {buckets['classifier_failed']}")
+    print(f"API errors while drafting (target 0):            {len(buckets['api_errors'])} {buckets['api_errors']}")
+    print(f"Auto-replies rejected by guardrails (target 0):  {len(buckets['auto_rejected'])} {buckets['auto_rejected']}")
+    print(f"Safe-info rejected by guardrails (target 0):     {len(buckets['safe_rejected'])} {buckets['safe_rejected']}")
     print(f"Total cost: ${total_cost:.4f}")
     print(f"Full texts: {path}")
-    return 1 if downgraded else 0
+    return 0 if valid else 1
 
 
 if __name__ == "__main__":

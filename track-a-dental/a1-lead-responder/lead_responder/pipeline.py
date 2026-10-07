@@ -6,6 +6,7 @@ human review, never in a wrong auto-reply.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime
 
@@ -21,10 +22,13 @@ log = logging.getLogger(__name__)
 
 EVENT_CLASSIFIER_FAILED = "classifier failed"
 EVENT_MESSAGE_TOO_LONG = "message too long for AI"
-EVENT_AUTO_REPLY_FAILED = "auto-reply failed"
-EVENT_SAFE_INFO_DROPPED = "safe-info dropped"
+EVENT_AUTO_REPLY_FAILED = "auto-reply failed"          # API error
+EVENT_SAFE_INFO_DROPPED = "safe-info dropped"          # API error
+EVENT_SAFE_INFO_REJECTED = "safe-info rejected"        # guardrail violation
+EVENT_AUTO_REPLY_REJECTED = "auto-reply rejected"      # guardrail violation
 EVENT_DRAFT_FAILED = "draft failed"
 
+_PLACEHOLDER = re.compile(r"[{}]|\[Name\]", re.IGNORECASE)
 _ORDER = {Action.AUTO_REPLY: 0, Action.ACKNOWLEDGMENT: 1, Action.DRAFT: 2}
 
 
@@ -90,7 +94,7 @@ def process_inquiry(
         else:
             if text:
                 # Keep the failed text as a draft so staff can see and fix it.
-                run.event(EVENT_AUTO_REPLY_FAILED, "; ".join(violations))
+                run.event(EVENT_AUTO_REPLY_REJECTED, "; ".join(violations))
                 replies.append(GeneratedReply(Action.DRAFT, drafter.fill_name(text, name), text, tuple(violations)))
             decision = downgrade_failed_auto_reply(decision)
 
@@ -142,10 +146,12 @@ def _acknowledgment(llm, redacted, name, classification, decision, practice, faq
         text = _generate(lambda: drafter.safe_info(
             llm, redacted_message=redacted, language=decision.language, practice=practice, faq=faq,
         ), run, EVENT_SAFE_INFO_DROPPED)
-        if text and text != drafter.NO_SAFE_INFO:
+        if text and text.strip().rstrip(".!").casefold() != drafter.NO_SAFE_INFO.casefold():
             violations = guardrails.check(text, practice, require_doctolib=False, emergency=False)
+            if _PLACEHOLDER.search(text):
+                violations = [*violations, "contains a placeholder"]
             if violations:
-                run.event(EVENT_SAFE_INFO_DROPPED, "; ".join(violations))
+                run.event(EVENT_SAFE_INFO_REJECTED, "; ".join(violations))
             else:
                 safe = text
     body = templates.acknowledgment(
