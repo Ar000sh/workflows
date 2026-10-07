@@ -1,0 +1,15 @@
+# Fictional demo practice. All phone numbers are fictional (0511 0000 ... cannot exist).
+name: Zahnarztpraxis BrightSmile
+address: Beispielstraße 12, 30161 Hannover
+phone: "0511 0000 100"
+email: praxis@brightsmile-demo.de
+notdienst_phone: "0511 0000 199"
+doctolib_url: https://www.doctolib.de/zahnarztpraxis/hannover/brightsmile-demo
+timezone: Europe/Berlin
+holiday_subdivision: NI   # Niedersachsen
+opening_hours:            # times must be quoted, YAML would misread 08:00
+  monday: ["08:00", "18:00"]
+  tuesday: ["08:00", "18:00"]
+  wednesday: ["08:00", "18:00"]
+  thursday: ["08:00", "18:00"]
+  friday: ["08:00", "14:00"]
