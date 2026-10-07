@@ -20,3 +20,6 @@ Thumbs.db
 
 # Symlinks into .agents/skills (restore with: npx skills experimental_install)
 .claude/skills/
+
+# Eval outputs (read locally, summarized in READMEs)
+eval_runs/

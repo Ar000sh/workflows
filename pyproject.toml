@@ -1,0 +1,28 @@
+[project]
+name = "ai-workflows"
+version = "0.1.0"
+description = "Tariq's AI automation lab and portfolio"
+requires-python = ">=3.11"
+dependencies = [
+  "anthropic>=1.11",
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+  "holidays>=0.60",
+  "tzdata>=2024.1",
+  "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# The last path segment becomes the import name: `shared`, `lead_responder`.
+packages = ["shared", "track-a-dental/a1-lead-responder/lead_responder"]
+
+[tool.pytest.ini_options]
+testpaths = ["shared/tests", "track-a-dental/a1-lead-responder/tests"]
+addopts = "--import-mode=importlib"
