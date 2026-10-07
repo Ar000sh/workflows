@@ -1,0 +1,41 @@
+import pytest
+
+from lead_responder.guardrails import check
+
+
+def ok_text(practice):
+    return f"Hallo {{name}}, Sie können online buchen: {practice.doctolib_url}. Bis bald!"
+
+
+def test_clean_text_passes(practice):
+    assert check(ok_text(practice), practice, require_doctolib=True, emergency=False) == []
+
+
+def test_missing_doctolib_link(practice):
+    assert check("Hallo, bis bald!", practice, require_doctolib=True, emergency=False) == ["missing Doctolib link"]
+
+
+def test_doctolib_not_required(practice):
+    assert check("Hallo, bis bald!", practice, require_doctolib=False, emergency=False) == []
+
+
+@pytest.mark.parametrize("price", ["150 €", "ca. 80 Euro", "€ 99", "EUR 20", "1.200,50€"])
+def test_prices_are_flagged(practice, price):
+    violations = check(f"Das kostet {price}.", practice, require_doctolib=False, emergency=False)
+    assert violations == ["mentions a price"]
+
+
+def test_dates_are_not_prices(practice):
+    assert check("Termin am 12.10. um 10 Uhr", practice, require_doctolib=False, emergency=False) == []
+
+
+def test_diagnosis_wording_is_flagged_case_insensitive(practice):
+    [violation] = check("Das ist vermutlich eine ENTZÜNDUNG.", practice, require_doctolib=False, emergency=False)
+    assert violation.startswith("diagnosis-like wording")
+    assert "entzündung" in violation
+
+
+def test_emergency_needs_contact(practice):
+    assert check("Wir melden uns.", practice, require_doctolib=False, emergency=True) == ["missing emergency contact"]
+    assert check("Rufen Sie die 112 an.", practice, require_doctolib=False, emergency=True) == []
+    assert check(f"Rufen Sie {practice.phone} an.", practice, require_doctolib=False, emergency=True) == []
