@@ -45,6 +45,10 @@ def main() -> int:
               f"got {result.category}/{result.final_risk}" + (f"  ERROR {error}" if error else ""))
 
     s = score(results)
+    if s.errors:
+        print(f"\nINCOMPLETE: {len(s.errors)} cases errored {list(s.errors)} - scores below are NOT valid")
+    else:
+        print(f"\nRun valid: {s.total}/{s.total} cases got an AI answer")
     print(f"\nModel: {CLASSIFIER_MODEL}")
     print(f"Category accuracy: {s.category_correct}/{s.total}")
     print(f"Risk accuracy:     {s.risk_correct}/{s.total}")

@@ -71,11 +71,10 @@ def main() -> int:
     path = OUT_DIR / f"drafts-{datetime.now():%Y%m%d-%H%M}.md"
     path.write_text("\n".join(report), encoding="utf-8")
 
-     produced = len(buckets["auto_produced"])
+    produced = len(buckets["auto_produced"])
     valid = not (buckets["classifier_failed"] or buckets["api_errors"] or buckets["auto_rejected"]
                  or buckets["safe_rejected"]) and produced > 0
-    print(f"
-Run valid: {'yes' if valid else 'NO - results cannot be trusted'}")
+    print(f"\nRun valid: {'yes' if valid else 'NO - results cannot be trusted'}")
     print(f"Auto-replies produced (must be > 0):             {produced}")
     print(f"Classifier failures (target 0):                  {len(buckets['classifier_failed'])} {buckets['classifier_failed']}")
     print(f"API errors while drafting (target 0):            {len(buckets['api_errors'])} {buckets['api_errors']}")
