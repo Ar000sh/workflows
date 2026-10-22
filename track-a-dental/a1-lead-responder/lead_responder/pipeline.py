@@ -150,7 +150,9 @@ def _generate(call, run: _Run, failure_event: str) -> str | None:
 
 def _acknowledgment(llm, redacted, name, classification, decision, practice, faq, practice_open, run) -> GeneratedReply:
     safe = None
-    if classification is not None and not decision.language_unsupported:
+    # Only sensitive leads get the AI safe-info paragraph. A routine lead in outside_hours mode is answered
+    # by staff during opening hours, so the fixed template alone is enough (saves one API call).
+    if classification is not None and not decision.language_unsupported and decision.risk is Risk.SENSITIVE:
         text = _generate(lambda: drafter.safe_info(
             llm, redacted_message=redacted, language=decision.language, practice=practice, faq=faq,
         ), run, EVENT_SAFE_INFO_DROPPED)
