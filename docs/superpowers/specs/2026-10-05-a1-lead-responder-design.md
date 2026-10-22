@@ -185,3 +185,30 @@ Spam protection (honeypot, rate limiting, captcha — deferred) · user-manageme
 
 ## 13. Autonomy decision (added 2026-10-22, retroactive)
 **Workflow, not an agent.** Our code fixes the steps (redact, classify, decide, write, check) and the AI fills individual steps; the model never chooses the next step or a tool. Why: every step is known in advance, and the send/no-send decision must be deterministic and testable (`router.py`, `guardrails.py`). Evidence from the build: twice a fixed template beat an AI call (acknowledgments, emergency numbers), and a keyword backstop was needed because the model's judgment is not guaranteed. What would change the decision: a need for open-ended lookups (for example order status), which belongs to Track B (B2), not here. Safety type: A (customer-facing), see `devsetup/safety-patterns.md`.
+
+## 14. Layer 4 failure modes (pre-mortem, plan mode of `/edge-case-probe`, 2026-10-23)
+Written before building layer 4. Status: **design** = handled by the design below, **test** = needs a test in the owning part, **parked** = consciously not now. Parts: 4a data, 4b intake API and sender, 4c auth and audit, 4d dashboard, 4e demo site and end-to-end.
+
+| # | Risk | What happens / what stops it | Part | Status |
+|---|---|---|---|---|
+| 1 | Two identical submissions race past the duplicate check | Duplicate check and insert run atomically under a Postgres advisory lock | 4a | test |
+| 2 | Hostile text breaks the database (NUL byte, SQL quotes, emoji, huge fields) | NUL stripped, parameterized SQL only, `CHECK` length limits as a last defence | 4a | test |
+| 3 | Personal data survives retention (reply bodies repeat the name, ids only half cleaned) | Anonymization also blanks `replies.body`/`ai_body`; an `edited` flag keeps the "approved unchanged" statistic; idempotent; exact 90-day boundary tested | 4a | test |
+| 4 | Naive or wrong-timezone timestamps | Only timezone-aware datetimes accepted; `timestamptz` columns | 4a | test |
+| 5 | Database down or slow when a lead arrives | Intake returns an error to the form; no half-saved state; nothing sent | 4b | test |
+| 6 | Lead saved, then the process dies mid-pipeline | Status stays `new`/`classified`; a startup sweep re-queues leads with no reply after N minutes | 4b | test |
+| 7 | Any exception (not only LLMError) in the pipeline leaves the patient without a response | Handler wraps `process_inquiry`; any exception sends the route-1 acknowledgment and flags the lead | 4b | test |
+| 8 | The "instant" acknowledgment waits for slow AI calls (worst case ~13 min) | Send the fixed acknowledgment first, then do the AI calls, with an overall deadline | 4b | test |
+| 9 | Form abused: huge body, no consent, invalid email, hostile name, flood from one source | Size caps, consent and email validation, `sanitize_name`, duplicate window, per-IP and per-email rate limit | 4b | test |
+| 10 | The form becomes a mail relay (stranger's address + attacker text) | Reply goes only to the form's email address, text is guardrailed final text, rate limit per address and per day | 4b | test |
+| 11 | Email sent twice, or never recorded as sent | Typed sender result (`accepted`/`failed`/`timeout`), no auto-retry after a timeout, `sent` is final (spec §7) | 4b | test |
+| 12 | Login brute force, user enumeration, stolen session | argon2, lockout 5/15 min, generic error, signed cookie 8 h, secure flags | 4c | test |
+| 13 | A staff action is not attributable | Every approve/edit/reject/resend/login writes an audit row in the same transaction | 4c | test |
+| 14 | XSS or injection through patient text on the dashboard | Jinja autoescape stays ON, no `|safe`, CSP header | 4d | test |
+| 15 | Staff approve an edited draft with a link or number the AI never wrote | Guardrail warnings are shown and stored in `audit_log.details` (warn, never block, spec §5.1) | 4d | design |
+| 16 | Two staff edit or send the same draft at once | Status check inside the transaction (only `drafted` can be approved) | 4d | test |
+| 17 | A sensitive lead waits unnoticed | Sensitive queue first, drafts over `APPROVAL_WARN_HOURS` highlighted, route-1/2 leads flagged `needs_manual_review` | 4d | design |
+| 18 | Demo site posts to the wrong place or leaks the API key | Static page only knows the form URL; no secrets in the page | 4e | design |
+| 19 | Cost abuse (unlimited AI calls from one actor) | Rate limits (#9) plus a daily AI call cap per instance | 4b | parked until a client deployment |
+| 20 | Redactor, guardrail and keyword-net gaps from the attack report | See "Parked" in `REVIEW.md` | n/a | parked |
+
