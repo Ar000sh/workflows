@@ -78,12 +78,17 @@ def process_inquiry(
     now: datetime,
     auto_reply_mode: str = AUTO_REPLY_MODE,
 ) -> PipelineResult:
+    # Step 0: setup. Reject empty input; _Run collects the cost and the events (warnings) of this one inquiry.
     if not message.strip():
         raise ValueError("message is empty")
     run = _Run()
     practice_open = practice.is_open(now)
-    redacted = redact(message)  # the only form of the message the AI ever sees
+    # Step 1: redact. Contact details and ID numbers are removed; the AI only ever sees this version.
+    redacted = redact(message)
+    # Step 2: classify (Haiku). Returns None if the call failed or the message is too long.
     classification = _classify(llm, redacted, message, run)
+    # Step 3: decide (plain code). The keyword net can override a "routine" classification; the router
+    # picks the actions: auto-reply, acknowledgment, draft (see the five routes in router.py).
     urgent_signs = mentions_urgent_signs(redacted)
     decision = decide(classification, auto_reply_mode=auto_reply_mode, practice_open=practice_open,
                       urgent_signs=urgent_signs)
@@ -92,6 +97,9 @@ def process_inquiry(
         run.event(EVENT_KEYWORD_OVERRIDE, "message mentions pain or injury but the classifier said routine")
     replies: list[GeneratedReply] = []
 
+    # Step 4a: auto-reply (routine). Written by the AI, checked by the guardrails. If it fails (API error
+    # or guardrail violation) it is NOT sent: the lead is downgraded to sensitive, and a rejected text
+    # is kept as a staff draft with the violations as warnings.
     if Action.AUTO_REPLY in decision.actions:
         text = _generate(lambda: drafter.auto_reply(
             llm, redacted_message=redacted, language=decision.language, practice=practice, faq=faq,
@@ -106,10 +114,13 @@ def process_inquiry(
                 replies.append(GeneratedReply(Action.DRAFT, drafter.fill_name(text, name), text, tuple(violations)))
             decision = downgrade_failed_auto_reply(decision)
 
+    # Step 4b: acknowledgment (fixed template, plus an AI safe-info paragraph for sensitive leads).
     if Action.ACKNOWLEDGMENT in decision.actions:
         replies.append(_acknowledgment(llm, redacted, name, classification, decision, practice, faq,
                                        practice_open, run))
 
+    # Step 4c: staff draft (AI text for a human to review). Skipped if 4a already produced a draft.
+    # If the draft call fails there is no draft, so the lead is flagged for manual review.
     if Action.DRAFT in decision.actions and not any(r.kind is Action.DRAFT for r in replies):
         text = _generate(lambda: drafter.staff_draft(
             llm, redacted_message=redacted, language=decision.language, practice=practice, faq=faq,
@@ -121,6 +132,8 @@ def process_inquiry(
         else:
             decision = replace(decision, needs_manual_review=True)
 
+    # Step 5: return everything. Nothing is sent or saved here (layer 4 does that), so layers 1-3 are testable.
+    # Order: auto-reply, acknowledgment, draft.
     replies.sort(key=lambda reply: _ORDER[reply.kind])
     return PipelineResult(classification, decision, tuple(replies), tuple(run.events), run.cost)
 
