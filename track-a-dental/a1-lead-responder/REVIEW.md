@@ -55,6 +55,7 @@ Hypothesis: better context lets a cheaper model write as well as Sonnet.
 
 ### 7. Layer 4 — after the drafter model is decided
 - [ ] FastAPI, Postgres, staff login and audit log, HTMX dashboard, Mailpit, Docker Compose, demo site. See spec section 9.
+- [ ] Form/API validation (found by the edge-case probe): cap the message size at the API (the pipeline also rejects > 5000 chars for the AI), cap and sanitise the name (max length, no newlines; it is inserted into reply bodies), escape everything on display (Jinja autoescape stays ON).
 - [ ] Dashboard shows two queues: sensitive drafts first, routine drafts below (decided 2026-10-22). Every lead has a draft to review, so staff never write from scratch.
 - [ ] Then layers 5–6 (n8n, staff notifications), ROI math in the README, demo video.
 

@@ -84,7 +84,9 @@ def process_inquiry(
     run = _Run()
     practice_open = practice.is_open(now)
     # Step 1: redact. Contact details and ID numbers are removed; the AI only ever sees this version.
-    redacted = redact(message)
+    # A too-long message never goes to the AI, so it is not redacted either: the redactor's regexes get
+    # slow on huge junk input, and the length limit must protect the server before they run.
+    redacted = redact(message) if len(message) <= MAX_MESSAGE_CHARS else ""
     # Step 2: classify (Haiku). Returns None if the call failed or the message is too long.
     classification = _classify(llm, redacted, message, run)
     # Step 3: decide (plain code). The keyword net can override a "routine" classification; the router

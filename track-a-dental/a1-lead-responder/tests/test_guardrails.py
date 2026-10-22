@@ -34,6 +34,12 @@ def test_dates_are_not_prices(practice):
     assert check("Termin am 12.10. um 10 Uhr", practice, require_doctolib=False) == []
 
 
+@pytest.mark.parametrize("text", ["Das klingt nach Gingivitis.", "Vielleicht eine Pulpitis.", "Es könnte eine Zyste sein.",
+                                  "That may be a tumor.", "Ich denke an Krebs."])
+def test_more_diagnosis_terms_are_flagged(practice, text):
+    assert check(text, practice, require_doctolib=False) != []
+
+
 def test_diagnosis_wording_is_flagged_case_insensitive(practice):
     [violation] = check("Das ist vermutlich eine ENTZÜNDUNG.", practice, require_doctolib=False)
     assert violation.startswith("diagnosis-like wording")

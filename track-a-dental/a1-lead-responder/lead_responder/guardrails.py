@@ -28,6 +28,7 @@ DIAGNOSIS_TERMS = (
     "parodontitis", "periodontitis",
     "entzündung", "inflammation",
     "infektion", "infection",
+    "gingivitis", "pulpitis", "zyste", "cyst", "tumor", "krebs", "cancer",
 )
 
 

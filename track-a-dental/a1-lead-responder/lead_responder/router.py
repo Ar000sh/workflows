@@ -30,7 +30,8 @@ _URGENT_SIGNS = re.compile(
     r"schmerz|\bweh\b|wehtun|pocht|\bblut|schwell|geschwollen|schwoll|notfall|notdienst|\bunfall"
     r"|fieber|atemnot|luftnot|abgebrochen|ausgeschlagen|herausgefallen|abgesplittert|\b112\b"
     r"|\bpain|\bach(?:e|es|ing)\b|\bhurt|\bbleed|\bblood|swell|swollen|emergency|accident|fever"
-    r"|broken|chipped|cracked|knocked out|fell out",
+    r"|broken|chipped|cracked|knocked out|fell out"
+    r"|wackel|locker|schluck|atem|schwindel|\bloose\b|swallow|breath|dizz",
     re.IGNORECASE,
 )
 

@@ -91,7 +91,8 @@ def test_downgrade_failed_auto_reply():
     "Ich habe starke Schmerzen", "ein Zahn tut seit Tagen weh", "Mein Zahnfleisch blutet", "Die Backe ist geschwollen",
     "Zahn abgebrochen", "Das ist ein Notfall", "Bitte dringend, Fieber dazu", "I am in pain", "my tooth is aching",
     "it hurts when I chew", "gum is bleeding", "my face is swelling", "this is an emergency", "chipped a tooth",
-    "Ich wähle die 112",
+    "Ich wähle die 112", "mein Zahn wackelt", "der Zahn ist locker", "ich kann nicht schlucken",
+    "tooth is loose", "I can't breathe", "mir ist schwindelig",
 ])
 def test_urgent_signs_are_detected(text):
     assert mentions_urgent_signs(text) is True

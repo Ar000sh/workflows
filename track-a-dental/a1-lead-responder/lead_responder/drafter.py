@@ -9,6 +9,7 @@ from pathlib import Path
 
 from lead_responder.config import DATA_DIR, DRAFTER_EFFORT, DRAFTER_MODEL
 from lead_responder.practice import Practice
+from lead_responder.prompting import inquiry_block
 from shared.llm import LLMClient, LLMResult
 
 NO_SAFE_INFO = "NONE"
@@ -107,7 +108,7 @@ def _call(llm: LLMClient, system: str, redacted_message: str) -> LLMResult[str]:
     return llm.text(
         model=DRAFTER_MODEL,
         system=system,
-        user=f"<inquiry>\n{redacted_message}\n</inquiry>",
+        user=inquiry_block(redacted_message),
         max_tokens=4096,
         effort=DRAFTER_EFFORT,
         fallbacks=True,

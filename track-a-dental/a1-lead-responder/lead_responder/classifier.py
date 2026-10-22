@@ -4,6 +4,7 @@ The caller must pass already-redacted text (see redactor.py).
 """
 from lead_responder.config import CLASSIFIER_MODEL
 from lead_responder.models import Classification
+from lead_responder.prompting import inquiry_block
 from shared.llm import LLMClient, LLMResult
 
 # Why there are no JSON examples (multi-shot) in this prompt:
@@ -39,7 +40,7 @@ def classify(llm: LLMClient, redacted_message: str, *, model: str = CLASSIFIER_M
     return llm.parse(
         model=model,
         system=SYSTEM_PROMPT,
-        user=f"<inquiry>\n{redacted_message}\n</inquiry>",
+        user=inquiry_block(redacted_message),
         output_model=Classification,
         max_tokens=512,
     )
