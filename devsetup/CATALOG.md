@@ -11,11 +11,19 @@
 | 2026-10-22 | `devsetup/model-choice.md` | template | Choosing Haiku vs Sonnet needs evidence, not guesses | Haiku vs Sonnet drafter experiment recorded |
 | 2026-10-22 | `.gitattributes` (`eol=lf`) | config | Windows line-ending warnings on every commit | New |
 | 2026-10-22 | `.python-version` (3.12) | config | uv picked Python 3.15 and compiled Rust for minutes | Tests run in seconds |
+| 2026-10-22 | `devsetup/safety-patterns.md` | checklist | A1's safety design should be reusable, but only where it applies | Type A verified in A1; types B and C are marked as hypotheses until Track C |
+| 2026-10-22 | `devsetup/spec-template.md` | template | Every spec should state autonomy (workflow vs agent), safety type, models and evals up front | New; A1 spec got a retroactive section |
 
-## Not built, on purpose
-- **Custom review agent:** the built-in `/code-review` covers it.
-- **Runtime Agent SDK skills / subagents in A1:** the code already knows the language and the steps; revisit in Track C.
+## Custom agents (subagents): not needed so far, not ruled out
+A1 had no need. This is a per-project, per-task question, never a standing rule. A custom agent (a role with its own prompt, tools, model and separate context, kept in `.claude/agents/`) pays off when:
+1. **Isolation:** the work would flood the main conversation (reading many files, long logs) and only the conclusion matters.
+2. **Parallel, independent work:** tasks that do not depend on each other.
+3. **Different model or cost:** cheap model for bulk reading, strong model for judgment.
+4. **Restricted tools:** a read-only reviewer or researcher that cannot write.
+5. **A role used again and again,** with stable instructions.
+Ask this at design time and record the answer. For agents inside a client product, the answer goes in the spec's "Autonomy decision". For the built-in `/code-review`, use it first; build our own only if it falls short.
+
+**Candidate worth trying:** an LLM judge that reads eval drafts and flags broken soft rules (for example "repeated the emergency numbers"), because the automatic checks missed exactly that. Test it against what Tariq finds by hand before trusting it.
 
 ## Candidates (decide when the need shows up)
-- `devsetup/safety-patterns.md`: reusable AI-in-production checklist (see discussion in the 2026-10-22 retrospective).
 - `/fewer-permission-prompts` allowlist once the routine commands are stable.
