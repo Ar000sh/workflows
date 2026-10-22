@@ -3,6 +3,12 @@
 > Living document. Update it when a decision is made or a goal changes.
 > Grilling sessions should leave their conclusions here, under **Decisions log**.
 
+## Current status (update at the end of every session)
+- **A1 lead responder:** layers 1-3 done, tested, reviewed by Tariq, attacked by a fresh agent (fixes committed). Live eval scores are in the A1 README. The drafter eval has not been re-run since the 2026-10-23 guardrail changes (optional, costs about $0.45).
+- **Next:** layer 4, split into 4a data, 4b intake API and sender, 4c auth and audit, 4d dashboard, 4e demo site and end-to-end. The 4a plan is `docs/superpowers/plans/2026-10-23-a1-layer-4a-data-foundation.md`, waiting for Tariq's go and his choice of execution method. Layer 4 failure modes: A1 spec section 14.
+- **Running things:** `uv run pytest`. DB tests need Docker Desktop running and `docker compose -f track-a-dental/a1-lead-responder/docker-compose.yml up -d postgres mailpit` (they skip, not fail, without it).
+- **Setup:** the git hook is enabled per clone (`git config core.hooksPath .githooks`). Skills: `/edge-case-probe`, `/run-evals`, `/retro`. Everything we added is in `devsetup/CATALOG.md`.
+
 ## Why this project exists
 Tariq wants to learn AI automation and AI workflows well enough to **earn money as a freelancer**. The work: integrating AI into real businesses in ways that save them measurable money or time. This repo is both the **learning lab** and the **portfolio**. Every project in it should double as a sales demo.
 
