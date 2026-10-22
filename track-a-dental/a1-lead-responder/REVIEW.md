@@ -24,9 +24,9 @@
 
 ### 2. Review the eval results (about 1 hr) — Tariq
 - [x] Open the newest `track-a-dental/a1-lead-responder/eval_runs/drafts-*.md` (latest: `drafts-20261022-2323.md`) and read 5–10 replies. Check facts against `faq.md`, tone, and the "no diagnosis / no prices" rules. Note findings below.
-- [ ] Rule on label `i05` (expected `medical_question`, Haiku said `pain_emergency`; both sensitive, so routing is the same).
-- [ ] Skim all labels in `data/eval_inquiries.jsonl`. The spec says every label is reviewed by you before the score counts.
-- [ ] Review `data/faq.md` and `data/practice.yaml` for correctness.
+- [x] Rule on label `i05` (expected `medical_question`, Haiku said `pain_emergency`; both sensitive, so routing is the same).
+- [x] Skim all labels in `data/eval_inquiries.jsonl`. The spec says every label is reviewed by you before the score counts.
+- [x] Review `data/faq.md` and `data/practice.yaml` for correctness.
 
 Notes:
 -

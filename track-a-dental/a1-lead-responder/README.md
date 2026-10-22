@@ -36,7 +36,7 @@ Run all commands from the repo root.
 A refusal or `max_tokens` stop is **not** retried (the same answer would come back): the call fails at once and the lead falls back to human review. Network errors, 429/5xx and invalid structured output are retried (up to 4 attempts).
 
 ## Eval results
-Run on 2026-10-22 against the live API. **Provisional:** the eval labels have not yet been reviewed by the practice owner (Tariq), so the scores only count once they are.
+Run on 2026-10-22 against the live API. Eval labels, `faq.md` and `practice.yaml` reviewed by Tariq on 2026-10-23, so these scores count. (Re-run the drafter eval after the 2026-10-23 guardrail changes; not done yet.)
 
 Classifier (`eval_classifier`, 45 inquiries incl. 5 prompt-injection cases), model `claude-haiku-4-5`, cost $0.057:
 - Category accuracy 44/45, risk accuracy 45/45, language accuracy 45/45.
