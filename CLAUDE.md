@@ -26,6 +26,14 @@ This repo is Tariq's lab and portfolio for learning **AI automation and AI workf
 - **New project specs start from `devsetup/spec-template.md`:** it forces an explicit Autonomy decision (workflow or agent, why, how we check it), a Safety type (`devsetup/safety-patterns.md`) and a models/context section. Patterns are matched to the project type, never applied blindly.
 - **Dev setup:** log every hook, skill or template we add in `devsetup/CATALOG.md`; model and effort choices go in `devsetup/model-choice.md` with measured evidence.
 
+## Using superpowers workflows with our skills
+Checked 2026-10-23: a subagent sees this CLAUDE.md, sees `edge-case-probe` and `run-evals`, and our `guard.py` hook blocks its writes too. It does **not** see `/retro` (manual-only). It cannot ask Tariq questions. So the skills are placed by stage, not handed to every subagent:
+- **Before writing a plan:** run `/edge-case-probe` in plan mode and fill the spec's "Failure modes"; the plan's Review Focus comes from it. (Main session.)
+- **While executing a plan** (subagent-driven or native): implementers and reviewers follow this file and TDD. When dispatching one, paste the plan's Global Constraints into its prompt, say the pre-commit gate exists and `--no-verify` is forbidden, and tell it to **stop and report, not ask**, if it is blocked.
+- **After the last task of each plan part** (for example 4a, 4b): the main session runs `/edge-case-probe` in attack mode (a fresh agent, independent of the implementers), triages, fixes the top 1-3 and parks the rest. Plans do not need to repeat this as a task; this rule is the source.
+- **Main session only, never from a subagent:** `/run-evals` (it asks Tariq and spends his API credit) and `/retro` (a conversation with Tariq).
+- **At the end of a layer or project:** `/retro`.
+
 ## Keeping the brief current
 - When a decision is made (in a grilling session or otherwise), add it to **Decisions log** in PROJECT.md and remove it from **Open questions**.
 - Do not start building a track while its blocking open questions are unanswered. Grill first.

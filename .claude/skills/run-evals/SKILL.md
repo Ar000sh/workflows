@@ -17,6 +17,7 @@ description: Re-run the A1 lead-responder classifier and drafter evals against t
 6. **Remind Tariq to read the drafts** in `eval_runs/drafts-*.md` (the header names the model). Automatic checks cannot judge tone or rule-following: two models passed every check and still differed.
 
 ## Rules
+- Run only in the main session with Tariq, never from a subagent (a subagent cannot ask him, and this spends his API credit).
 - Never run the evals without the answer from step 2.
 - The key lives in `.env`; never print it or put it in a file.
 - Scores are only valid when the run says "Run valid" (all cases got an AI answer).

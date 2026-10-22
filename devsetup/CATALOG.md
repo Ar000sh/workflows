@@ -15,6 +15,9 @@
 | 2026-10-22 | `devsetup/safety-patterns.md` | checklist | A1's safety design should be reusable, but only where it applies | Type A verified in A1; types B and C are marked as hypotheses until Track C |
 | 2026-10-22 | `devsetup/spec-template.md` | template | Every spec should state autonomy (workflow vs agent), safety type, models and evals up front | New; A1 spec got a retroactive section |
 
+## What subagents inherit (checked 2026-10-23, Haiku test agent)
+They get the project `CLAUDE.md`, can see our project skills (`edge-case-probe`, `run-evals`; not the manual-only `/retro`), have their own Agent tool, and the `guard.py` hook blocks their `.env` writes. Not tested: the Bash branch of the guard from inside a subagent (the agent declined to try). Where each skill runs is in `CLAUDE.md`, section "Using superpowers workflows with our skills".
+
 ## Custom agents (subagents): not needed so far, not ruled out
 A1 had no need. This is a per-project, per-task question, never a standing rule. A custom agent (a role with its own prompt, tools, model and separate context, kept in `.claude/agents/`) pays off when:
 1. **Isolation:** the work would flood the main conversation (reading many files, long logs) and only the conclusion matters.
