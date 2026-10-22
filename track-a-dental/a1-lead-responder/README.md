@@ -53,6 +53,6 @@ date and model used) into this section.
 
 ## DSGVO notes
 - Only redacted message text is sent to Anthropic; names, emails and phone fields stay local.
-- Known limitation: names written inside the message text are not removed.
+- Known limitation: names, birth dates and street addresses written inside the message text are not removed (see REVIEW.md, "Parked: redactor hardening").
 - Processors a real deployment needs a DPA (AVV) with: Anthropic, the email provider, the hosting provider.
 - These notes are orientation, not legal advice.

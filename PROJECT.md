@@ -16,6 +16,17 @@ Tariq wants to learn AI automation and AI workflows well enough to **earn money 
 3. One productized, fixed-price offer (e.g. "AI Receptionist: setup fee + monthly retainer").
 4. 1–3 paying clients or paid pilots.
 
+## Parallel goal: build a reusable dev setup as we go
+Alongside the client projects, we grow a **personal AI dev setup** that is ready to reuse on any future client project. It is built *from real need*, not up front: when a build hurts or repeats, we ask "should this be a skill / agent / hook / template?" and add it only if it earns its place.
+- **Skills**: repeatable procedures (e.g. new-track scaffold, eval run, ROI-README writer).
+- **Agents (subagents)**: only where isolation or a different model pays off (e.g. reviewer, researcher).
+- **Hooks**: automatic guardrails (e.g. block committing `.env`, run tests/lint after edits).
+- **Plugins / MCP servers**: adopt when they clearly work well; record what and why.
+- **Context engineering**: how we structure CLAUDE.md, memory, specs, what goes in context vs. retrieved, and how we keep sessions small and focused.
+- **Model & reasoning templates**: for each kind of task, a ready-to-use choice of model (Haiku / Sonnet / Opus), thinking on/off and effort level, with the *why* and measured cost/quality. These feed both our own Claude Code usage and the client builds (e.g. Haiku classifies, Sonnet drafts).
+- **Home:** `devsetup/` (templates, notes, `CATALOG.md` logging each addition: what, why, when it helped). Live config stays in `.claude/`.
+- **Rule:** every project ends with a short "what should enter the setup?" review.
+
 ## What businesses pay for (the lens for every project)
 Every build must map to one of these outcomes and come with ROI math ("saves X hrs/week × $Y/hr"):
 1. **Never miss a lead**: instant reply and qualification.
@@ -71,6 +82,8 @@ workflows/
   track-b-ecommerce/
   track-c-agency/
   business/            # offers, pricing, outreach templates, case studies
+  devsetup/            # reusable skills/agents/hooks/prompt + model templates, CATALOG.md
+  .claude/             # live project config (settings, hooks, skills, agents)
 ```
 
 ## Open questions (for grilling)
@@ -82,6 +95,8 @@ These are **not decided yet**. Settle them before building, and record the answe
 - **Pricing:** setup fee + retainer amounts; paid pilot vs. free pilot.
 - **Budget:** monthly spend allowed on APIs, hosting, and tools. ⚠️ An Anthropic Console account + API key is needed **before A1 layer 1**.
 - **Definition of done** for each project (demo video? eval threshold? deployed URL?).
+- **Knowledge feedback loop (A1, after layer 4):** staff suggest FAQ entries or good edited replies from the dashboard, and an approver accepts them into a versioned FAQ / few-shot examples; gap detection lists unanswerable routine questions. Who approves (owner only or any staff)? Layer 4b or a new layer 7? See track-a-dental/a1-lead-responder/REVIEW.md step 8.
+- **Dev setup:** which first items go in (candidates: secrets-guard hook, eval-run skill, model-choice template)? Do we also want a per-project "what enters the setup?" checklist step in the definition of done?
 
 ## Decisions log
 | Date | Decision | Why |
@@ -95,3 +110,4 @@ These are **not decided yet**. Settle them before building, and record the answe
 | 2026-10-05 | A1 grilling: Hannover practice; DE+EN only; only redacted message text goes to Claude; Haiku classifies / Sonnet drafts; real staff logins + audit log; spam protection deferred | Details in the A1 spec |
 | 2026-10-05 | **Working mode:** Claude writes each layer and explains it; Tariq reviews and runs. No exercises. | Tariq's choice in grilling (Q1, Q18) |
 | 2026-10-05 | Tooling: `uv`, git | Modern standard; one-line setup per track |
+| 2026-10-22 | **Parallel goal: grow a reusable dev setup** (skills, agents if worth it, hooks, plugins, context-engineering practice, model/effort/reasoning templates) in `devsetup/` + `.claude/`, added only when a real need shows up | Tariq wants templates ready for client work; need-driven avoids over-engineering |
