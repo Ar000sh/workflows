@@ -28,7 +28,7 @@ Run all commands from the repo root.
 ## How an inquiry flows
 1. **Redact** emails and phone numbers → only the message text goes to Claude.
 2. **Classify** (Haiku, structured output) → category, risk, urgency, language.
-3. **Route** (plain Python) → auto-reply, or acknowledgment + staff draft.
+3. **Route** (plain Python) → auto-reply, or acknowledgment + staff draft. A keyword safety net (pain, bleeding, swelling, Notfall, 112, ...) forces the sensitive route even if the classifier said routine.
 4. **Write** texts (Sonnet) from `data/faq.md`; acknowledgments are fixed templates plus an optional AI safe-info paragraph (guardrail-checked).
 5. **Guardrails** check every AI text; a failing auto-reply goes to staff instead.
 

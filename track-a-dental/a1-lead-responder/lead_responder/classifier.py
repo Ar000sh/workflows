@@ -6,6 +6,14 @@ from lead_responder.config import CLASSIFIER_MODEL
 from lead_responder.models import Classification
 from shared.llm import LLMClient, LLMResult
 
+# Why there are no JSON examples (multi-shot) in this prompt:
+# The output FORMAT is enforced by the API. llm.parse(output_format=Classification) sends the
+# JSON schema of models.py, so Claude can only answer with valid enum values and fields, and
+# the SDK validates the result (retries, then human review on failure). The prompt only has to
+# teach JUDGMENT: what each category means and when a message is sensitive.
+# Add examples only when the eval shows a boundary the definitions cannot settle (e.g. i05:
+# medical_question vs pain_emergency), and keep them out of data/eval_inquiries.jsonl,
+# or we would be scoring the model on answers we gave it.
 SYSTEM_PROMPT = """You classify inquiries sent through the website contact form of a dental practice in Hannover, Germany.
 
 Return:

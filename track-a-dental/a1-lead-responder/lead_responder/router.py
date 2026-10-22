@@ -4,6 +4,7 @@ Given the classifier's output, decide which replies to create.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
@@ -20,6 +21,22 @@ ALWAYS_SENSITIVE = frozenset({
     Category.PRICING,
     Category.OTHER,
 })
+
+
+# Keyword safety net: plain code with the last word on pain/injury, in case the classifier misses it.
+# Deliberately broad. A false alarm only sends a draft to staff (with emergency info); a miss would
+# auto-reply to someone in pain. Matches word stems, case-insensitive, German and English.
+_URGENT_SIGNS = re.compile(
+    r"schmerz|\bweh\b|wehtun|pocht|\bblut|schwell|geschwollen|schwoll|notfall|notdienst|\bunfall"
+    r"|fieber|atemnot|luftnot|abgebrochen|ausgeschlagen|herausgefallen|abgesplittert|\b112\b"
+    r"|\bpain|\bach(?:e|es|ing)\b|\bhurt|\bbleed|\bblood|swell|swollen|emergency|accident|fever"
+    r"|broken|chipped|cracked|knocked out|fell out",
+    re.IGNORECASE,
+)
+
+
+def mentions_urgent_signs(text: str) -> bool:
+    return _URGENT_SIGNS.search(text) is not None
 
 
 class Action(StrEnum):
@@ -47,31 +64,40 @@ def decide(
     *,
     auto_reply_mode: str = "always",
     practice_open: bool = False,
+    urgent_signs: bool = False,
 ) -> Decision:
     if auto_reply_mode not in AUTO_REPLY_MODES:
         raise ValueError(f"auto_reply_mode must be one of {AUTO_REPLY_MODES}, got {auto_reply_mode!r}")
 
+    # Route 1: classifier failed. We know nothing about the message: acknowledge in both
+    # languages, include emergency info in case it was about pain, and let a human take over.
     if classification is None:
-        # We know nothing about the message: acknowledge in both languages, include
-        # emergency info in case it was about pain, and let a human take over.
         return Decision(Risk.SENSITIVE, (Action.ACKNOWLEDGMENT,), COMBINED_LANGUAGE,
                         emergency=True, language_unsupported=False, needs_manual_review=True)
 
     language = normalize_language(classification.language)
-    emergency = classification.category is Category.PAIN_EMERGENCY
+    # The keyword net (urgent_signs) can only make things safer: it forces emergency info and Route 3.
+    emergency = classification.category is Category.PAIN_EMERGENCY or urgent_signs
 
+    # Route 2: language is not DE/EN. Acknowledge in both languages, no AI draft; staff handle it.
     if language not in SUPPORTED_LANGUAGES:
         return Decision(Risk.SENSITIVE, (Action.ACKNOWLEDGMENT,), COMBINED_LANGUAGE,
                         emergency=emergency, language_unsupported=True, needs_manual_review=False)
 
-    if classification.risk is Risk.SENSITIVE or classification.category in ALWAYS_SENSITIVE:
+    # Route 3: sensitive (model says so, the category is always sensitive whatever the model says,
+    # or the keyword net fired). Instant acknowledgment for the patient + AI draft for staff to approve.
+    if classification.risk is Risk.SENSITIVE or classification.category in ALWAYS_SENSITIVE or urgent_signs:
         return Decision(Risk.SENSITIVE, (Action.ACKNOWLEDGMENT, Action.DRAFT), language,
                         emergency=emergency, language_unsupported=False, needs_manual_review=False)
 
+    # Route 4: routine, but the practice wants staff to answer during opening hours
+    # (AUTO_REPLY_MODE=outside_hours). The patient still gets the instant acknowledgment; staff get a draft.
     if auto_reply_mode == "outside_hours" and practice_open:
-        return Decision(Risk.ROUTINE, (Action.DRAFT,), language,
+        return Decision(Risk.ROUTINE, (Action.ACKNOWLEDGMENT, Action.DRAFT), language,
                         emergency=False, language_unsupported=False, needs_manual_review=False)
 
+    # Route 5: routine. Auto-reply straight away (the pipeline still guardrail-checks the text
+    # and falls back to downgrade_failed_auto_reply below if it fails).
     return Decision(Risk.ROUTINE, (Action.AUTO_REPLY,), language,
                     emergency=False, language_unsupported=False, needs_manual_review=False)
 

@@ -77,6 +77,8 @@ First project of the AI-automation learning plan. Two equal jobs:
 ### 4.2 Classification
 **Categories:** `appointment`, `new_patient`, `insurance`, `opening_hours` (typically routine); `pain_emergency`, `medical_question`, `complaint`, `pricing`, `other` (always sensitive). The classifier proposes `risk`; the router **forces sensitive** for the always-sensitive categories regardless of the model's `risk`.
 
+**Keyword safety net (added 2026-10-22):** plain code (`router.mentions_urgent_signs`) scans the redacted message for pain/injury words in German and English (Schmerz, weh, blutet, geschwollen, Notfall, 112, pain, aching, bleeding, swelling, ...). A hit forces the sensitive route with emergency info, even if the classifier said routine. It can only make the outcome safer; a false alarm costs staff one draft. The pipeline logs a `keyword safety net` event when it overrides the classifier.
+
 **Safety default:** classifier failure, invalid JSON after 3 retries, or guardrail failure on an auto-reply → lead treated as **sensitive** with `needs_manual_review`. An error can only cause human review, never a wrong auto-reply.
 
 ### 4.3 Acknowledgments (sensitive leads)
@@ -91,7 +93,7 @@ First project of the AI-automation learning plan. Two equal jobs:
 Lead saved, flagged `language_unsupported`, treated as sensitive; **DE+EN combined template acknowledgment** sent; **no AI draft** — staff handle it directly. No lead is ever dropped.
 
 ### 4.5 Auto-replies (routine leads)
-Sent immediately (`AUTO_REPLY_MODE=always`, default) or only outside opening hours (`outside_hours`, routine leads then queue for staff during opening hours). Always include the Doctolib link.
+Sent immediately (`AUTO_REPLY_MODE=always`, default) or only outside opening hours (`outside_hours`; during opening hours routine leads get the standard instant acknowledgment and an AI draft in the staff queue). Auto-replies always include the Doctolib link.
 
 ## 5. Data model
 **`leads`** — `id`, `created_at`, `channel` (`web_form`; later `whatsapp`, `email`), `name`, `email`, `phone` (nullable), `message`, `consent_at`, `category`, `risk`, `urgency`, `language`, `language_unsupported`, `ai_reason`, `needs_manual_review`, `status`, `anonymized_at`.

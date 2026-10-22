@@ -12,10 +12,12 @@ from datetime import datetime
 
 from lead_responder import classifier, drafter, guardrails, templates
 from lead_responder.config import AUTO_REPLY_MODE, MAX_MESSAGE_CHARS
-from lead_responder.models import Classification
+from lead_responder.models import Classification, Risk
 from lead_responder.practice import Practice
 from lead_responder.redactor import redact
-from lead_responder.router import Action, Decision, decide, downgrade_failed_auto_reply
+from lead_responder.router import (
+    ALWAYS_SENSITIVE, Action, Decision, decide, downgrade_failed_auto_reply, mentions_urgent_signs,
+)
 from shared.llm import LLMClient, LLMError
 
 log = logging.getLogger(__name__)
@@ -27,6 +29,7 @@ EVENT_SAFE_INFO_DROPPED = "safe-info dropped"          # API error
 EVENT_SAFE_INFO_REJECTED = "safe-info rejected"        # guardrail violation
 EVENT_AUTO_REPLY_REJECTED = "auto-reply rejected"      # guardrail violation
 EVENT_DRAFT_FAILED = "draft failed"
+EVENT_KEYWORD_OVERRIDE = "keyword safety net"          # message mentions pain/injury, classifier said routine
 
 _PLACEHOLDER = re.compile(r"[{}]|\[Name\]", re.IGNORECASE)
 _ORDER = {Action.AUTO_REPLY: 0, Action.ACKNOWLEDGMENT: 1, Action.DRAFT: 2}
@@ -81,7 +84,12 @@ def process_inquiry(
     practice_open = practice.is_open(now)
     redacted = redact(message)  # the only form of the message the AI ever sees
     classification = _classify(llm, redacted, message, run)
-    decision = decide(classification, auto_reply_mode=auto_reply_mode, practice_open=practice_open)
+    urgent_signs = mentions_urgent_signs(redacted)
+    decision = decide(classification, auto_reply_mode=auto_reply_mode, practice_open=practice_open,
+                      urgent_signs=urgent_signs)
+    if (urgent_signs and classification is not None and classification.risk is Risk.ROUTINE
+            and classification.category not in ALWAYS_SENSITIVE):
+        run.event(EVENT_KEYWORD_OVERRIDE, "message mentions pain or injury but the classifier said routine")
     replies: list[GeneratedReply] = []
 
     if Action.AUTO_REPLY in decision.actions:
