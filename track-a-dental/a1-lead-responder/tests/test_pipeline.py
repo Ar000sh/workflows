@@ -116,7 +116,7 @@ def test_contact_details_never_reach_the_ai(practice):
     sent = [c["user"] for c in llm.parse_calls + llm.text_calls]
     for text in sent:
         assert "anna@example.de" not in text and "0170 0000123" not in text and "Anna" not in text
-        assert "[EMAIL]" in text and "[PHONE]" in text
+        assert "[EMAIL]" in text and "[NUMBER]" in text
 
 
 def test_empty_message_is_rejected(practice):

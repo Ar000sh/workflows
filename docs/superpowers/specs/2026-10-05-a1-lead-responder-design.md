@@ -58,7 +58,7 @@ First project of the AI-automation learning plan. Two equal jobs:
 | Unit | Responsibility | Depends on |
 |---|---|---|
 | `shared/llm.py` | Thin Claude client wrapper: model selection, retries (up to 3, exponential backoff), JSON parsing, token/cost logging. Reused by later tracks. | Anthropic SDK |
-| `redactor` | Replaces emails and phone numbers in message text with `[EMAIL]` / `[PHONE]` before any AI call. Names in free text are not removed (documented limitation). | — |
+| `redactor` | Replaces emails with `[EMAIL]` and phone, card, IBAN and insurance numbers with `[NUMBER]` before any AI call. Names in free text are not removed (documented limitation). | — |
 | `classifier` | One Claude call (Haiku) → validated JSON (Pydantic): `category`, `risk`, `urgency`, `language`, `reason` | `shared/llm` |
 | `drafter` | Claude call (Sonnet). Writes (a) routine auto-replies, (b) the optional **safe-info paragraph** for acknowledgments, (c) drafts for staff. Uses `{name}` placeholder; name filled in locally after generation. | `shared/llm`, `faq.md` |
 | `templates` | Fixed acknowledgment texts (DE, EN, DE+EN combined), with emergency variants | `practice` |
