@@ -6,7 +6,7 @@
 |---|---|---|---|---|
 | 2026-10-22 | `.claude/hooks/guard.py` (PreToolUse on Write/Edit/Bash) | hook | The API key almost went into `.env.example` | Blocked its own test command on first use; 20 tests in `.claude/hooks/test_hooks.py` |
 | 2026-10-22 | `.githooks/pre-commit` + `.claude/hooks/precommit.py` | git hook | Commits could carry a key or a broken suite; tests run in seconds | Runs for Tariq's commits too. Docs-only commits skip tests; a timeout asks Tariq to change the rule. **Enable once per clone:** `git config core.hooksPath .githooks` |
-| 2026-10-22 | `.claude/skills/edge-case-probe` | skill | 100% coverage hid a regex slowdown, a prompt-tag break-out and README drift | Found 2 real bugs in A1 in one pass |
+| 2026-10-22 | `.claude/skills/edge-case-probe` (plan mode + attack mode with `attacker-prompt.md`) | skill + fresh subagent | 100% coverage hid a regex slowdown, a prompt-tag break-out and README drift; the author probing their own code only finds what they can think of | Same-context probe found 2 real bugs in A1. Attack mode is new: record in a follow-up what the fresh attacker finds that we missed |
 | 2026-10-22 | `.claude/skills/run-evals` | skill | Evals must be re-run after every prompt/model/router change; they cost money | New, not yet used |
 | 2026-10-22 | `devsetup/model-choice.md` | template | Choosing Haiku vs Sonnet needs evidence, not guesses | Haiku vs Sonnet drafter experiment recorded |
 | 2026-10-22 | `.gitattributes` (`eol=lf`) | config | Windows line-ending warnings on every commit | New |

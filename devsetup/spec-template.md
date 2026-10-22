@@ -1,6 +1,6 @@
 # <Project name>: Design Spec
 
-> Copy to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`. Delete hints. Sections 1-3 and 8-10 are the ones the A1 retrospective added.
+> Copy to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`. Delete hints. Sections 3 and 8-11 are the ones the A1 retrospective added.
 
 ## 1. Purpose and business outcome
 One of the 5 outcomes in PROJECT.md, the ROI story (hours saved x rate, or leads not lost), the learning goal.
@@ -26,20 +26,28 @@ Data model, what is sent to the AI (minimized), retention.
 ## 7. Error handling
 Per failure: what happens, who is told. "An error may only lead to human review, never to a wrong automatic action" for customer-facing work.
 
-## 8. Safety type
+## 8. Failure modes (pre-mortem, written BEFORE building)
+Run the checklist of `.claude/skills/edge-case-probe` (plan mode) against this design. One row per risk:
+
+| Risk | What happens | Stopped by (code / template / guardrail / human) | Status: handled by design / needs a test / parked (why) |
+|---|---|---|---|
+
+Cover at least: huge or hostile input, delimiter break-out, every failure of an external call, what reaches a person unreviewed, duplicates and retries, cost abuse.
+
+## 9. Safety type
 Type A, B or C from `devsetup/safety-patterns.md` (or mixed). List which patterns apply and which do not, and why.
 
-## 9. Models and context
+## 10. Models and context
 Which model per task, effort, thinking on/off, and the evidence or the experiment planned (`devsetup/model-choice.md`). What goes into the context and how it is selected (FAQ, style guide, examples).
 
-## 10. Testing and evals
-Unit tests, eval set (who reviews the labels), safety targets (usually 0), what is read by hand, and the planned `/edge-case-probe` pass.
+## 11. Testing and evals
+Unit tests, eval set (who reviews the labels), safety targets (usually 0), what is read by hand, and and the planned `/edge-case-probe` attack pass by a fresh agent after the build.
 
-## 11. Build layers
+## 12. Build layers
 Layer, concepts learned, done when.
 
-## 12. Definition of done
+## 13. Definition of done
 Runs end-to-end from the README, tests pass, eval scores recorded, README and spec match the code, demo script or video, `REVIEW.md` closed out.
 
-## 13. Out of scope
+## 14. Out of scope
 Explicit list, so ideas have a parking place.

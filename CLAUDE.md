@@ -22,7 +22,7 @@ This repo is Tariq's lab and portfolio for learning **AI automation and AI workf
 - **Secrets:** a hook blocks writing `.env` or key literals (`sk-ant-...`). Tariq edits `.env` himself; Claude only touches `.env.example`.
 - **Comments teach.** Short comments above functions and steps saying what happens and why (what flows where), in the style of `pipeline.py` and `router.py`.
 - **Each project keeps its own `REVIEW.md`** next to its README: what Tariq must review or decide, plus a "Parked" list for ideas we chose not to do now.
-- **Before calling a module or layer done, run `/edge-case-probe`. After a prompt, model, router or guardrail change, run `/run-evals`** (it asks first, because it costs money).
+- **Edge cases in two moments:** at design time run `/edge-case-probe` in plan mode and fill the spec's "Failure modes" section; before calling a module or layer done run it in attack mode (a fresh subagent that has not seen our reasoning tries to break the code). **After a prompt, model, router or guardrail change, run `/run-evals`** (it asks first, because it costs money).
 - **New project specs start from `devsetup/spec-template.md`:** it forces an explicit Autonomy decision (workflow or agent, why, how we check it), a Safety type (`devsetup/safety-patterns.md`) and a models/context section. Patterns are matched to the project type, never applied blindly.
 - **Dev setup:** log every hook, skill or template we add in `devsetup/CATALOG.md`; model and effort choices go in `devsetup/model-choice.md` with measured evidence.
 
