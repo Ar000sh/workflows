@@ -62,9 +62,9 @@ def test_language_codes_are_normalized(code, expected):
     assert decide(cls("opening_hours", language=code)).language_unsupported is False
 
 
-def test_outside_hours_mode_only_acknowledges_routine_while_open():
+def test_outside_hours_mode_acknowledges_and_drafts_routine_while_open():
     decision = decide(cls("opening_hours"), auto_reply_mode="outside_hours", practice_open=True)
-    assert decision.actions == (Action.ACKNOWLEDGMENT,)
+    assert decision.actions == (Action.ACKNOWLEDGMENT, Action.DRAFT)
     assert decision.risk is Risk.ROUTINE
     assert decision.emergency is False
 

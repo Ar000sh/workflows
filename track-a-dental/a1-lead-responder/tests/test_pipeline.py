@@ -132,11 +132,12 @@ def test_very_long_message_skips_ai(practice):
     assert any(e.startswith(EVENT_MESSAGE_TOO_LONG) for e in result.events)
 
 
-def test_outside_hours_mode_only_acknowledges_routine_while_open(practice):
-    llm = FakeLLM(parse=[cls("opening_hours")])
+def test_outside_hours_mode_acknowledges_and_drafts_routine_while_open(practice):
+    llm = FakeLLM(parse=[cls("opening_hours")], text=["Hallo {name}, Entwurf."])
     result = run(llm, practice, mode="outside_hours", now=MONDAY_10)
-    assert kinds(result) == [Action.ACKNOWLEDGMENT]
-    assert llm.text_calls == []                          # no Sonnet call: staff answer personally
+    assert kinds(result) == [Action.ACKNOWLEDGMENT, Action.DRAFT]
+    assert result.decision.risk is Risk.ROUTINE
+    assert len(llm.text_calls) == 1                      # only the staff draft: no AI safe-info paragraph
     assert result.replies[0].ai_body is None
     assert result.decision.risk is Risk.ROUTINE
     assert result.decision.needs_manual_review is False

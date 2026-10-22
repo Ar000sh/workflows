@@ -69,7 +69,7 @@ First project of the AI-automation learning plan. Two equal jobs:
 | `sender` | `send(reply)` returning a typed result: `accepted`, `failed` (retryable), or `timeout` (outcome unknown). Implementations `SmtpSender`, `N8nSender`. Retry policy lives here (§7). | SMTP / n8n |
 | `auth` | Staff login: argon2 password hashing, signed session cookie, lockout. CLI for account management (§5.1). | repository |
 | `audit` | Records every staff action with user + timestamp | repository |
-| `dashboard` | Server-rendered pages behind login: lead list with filters, lead detail, approve/edit/reject, resend; highlights drafts waiting > 4h | repository, sender, auth, audit |
+| `dashboard` | Server-rendered pages behind login: lead list with filters, lead detail, approve/edit/reject, resend; highlights drafts waiting > 4h; **two work queues: sensitive drafts first (also emergencies/urgency on top), routine drafts below**, so staff review and send, never write from scratch | repository, sender, auth, audit |
 | `retention` | Anonymizes leads older than `RETENTION_DAYS` (default 90) | repository |
 | demo website | Static BrightSmile page with contact form | — |
 | n8n flows | `website-form` intake → `POST /leads`; `send-reply` webhook → email | API |
@@ -93,7 +93,7 @@ First project of the AI-automation learning plan. Two equal jobs:
 Lead saved, flagged `language_unsupported`, treated as sensitive; **DE+EN combined template acknowledgment** sent; **no AI draft** — staff handle it directly. No lead is ever dropped.
 
 ### 4.5 Auto-replies (routine leads)
-Sent immediately (`AUTO_REPLY_MODE=always`, default) or only outside opening hours (`outside_hours`; during opening hours routine leads get only the fixed instant acknowledgment and wait in the dashboard for staff, no AI text). Auto-replies always include the Doctolib link.
+Sent immediately (`AUTO_REPLY_MODE=always`, default) or only outside opening hours (`outside_hours`; during opening hours routine leads get the fixed instant acknowledgment (no AI paragraph) and an AI draft for staff to review and send). Auto-replies always include the Doctolib link.
 
 ## 5. Data model
 **`leads`** — `id`, `created_at`, `channel` (`web_form`; later `whatsapp`, `email`), `name`, `email`, `phone` (nullable), `message`, `consent_at`, `category`, `risk`, `urgency`, `language`, `language_unsupported`, `ai_reason`, `needs_manual_review`, `status`, `anonymized_at`.

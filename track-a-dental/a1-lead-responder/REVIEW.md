@@ -55,6 +55,7 @@ Hypothesis: better context lets a cheaper model write as well as Sonnet.
 
 ### 7. Layer 4 — after the drafter model is decided
 - [ ] FastAPI, Postgres, staff login and audit log, HTMX dashboard, Mailpit, Docker Compose, demo site. See spec section 9.
+- [ ] Dashboard shows two queues: sensitive drafts first, routine drafts below (decided 2026-10-22). Every lead has a draft to review, so staff never write from scratch.
 - [ ] Then layers 5–6 (n8n, staff notifications), ROI math in the README, demo video.
 
 ### 8. Proposed feature: knowledge feedback loop (not decided, after layer 4)
