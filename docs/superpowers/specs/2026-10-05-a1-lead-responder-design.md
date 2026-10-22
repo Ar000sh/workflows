@@ -63,7 +63,7 @@ First project of the AI-automation learning plan. Two equal jobs:
 | `drafter` | Claude call (Sonnet). Writes (a) routine auto-replies, (b) the optional **safe-info paragraph** for acknowledgments, (c) drafts for staff. Uses `{name}` placeholder; name filled in locally after generation. | `shared/llm`, `faq.md` |
 | `templates` | Fixed acknowledgment texts (DE, EN, DE+EN combined), with emergency variants | `practice` |
 | `practice` | Reads structured practice config: opening hours, Niedersachsen public holidays, phone numbers, Notdienst info, Doctolib link; answers `is_open(now)` | config file |
-| `guardrails` | Deterministic checks on AI text: Doctolib link present, no price figures, no diagnosis terms, emergency info present when pain mentioned | — |
+| `guardrails` | Deterministic checks on AI text: Doctolib link present, no price figures, no diagnosis terms (emergency numbers live in the fixed acknowledgment template, not in AI text) | — |
 | `router` | Plain Python decision: which replies to create and which status to set. No AI. | — |
 | `repository` | All DB reads/writes | Postgres |
 | `sender` | `send(reply)` returning a typed result: `accepted`, `failed` (retryable), or `timeout` (outcome unknown). Implementations `SmtpSender`, `N8nSender`. Retry policy lives here (§7). | SMTP / n8n |
@@ -84,7 +84,7 @@ First project of the AI-automation learning plan. Two equal jobs:
 ### 4.3 Acknowledgments (sensitive leads)
 - **Never skipped.** Every sensitive lead gets an instant acknowledgment.
 - Body = **fixed template** (in the lead's language) + optional **AI safe-info paragraph** that adds only FAQ facts relevant to the inquiry (e.g. general insurance coverage for a pricing question). The paragraph passes `guardrails`; if it fails or the AI finds nothing safe to add, it is dropped and the template goes out alone.
-- **Emergency variant** (`pain_emergency`), chosen by `practice.is_open(now)`:
+- **Emergency variant** (`pain_emergency` or keyword net), chosen by `practice.is_open(now)`. Only the acknowledgment carries emergency numbers; the staff draft for pain addresses the concern and offers an urgent slot without repeating them:
   - open → "please call us now at <practice phone>"
   - closed (incl. Niedersachsen public holidays) → zahnärztlicher Notdienst info
   - always → "for life-threatening symptoms (heavy bleeding, facial swelling with difficulty breathing) call **112**"

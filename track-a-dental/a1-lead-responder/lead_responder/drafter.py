@@ -22,6 +22,8 @@ def load_faq(path: Path = DATA_DIR / "faq.md") -> str:
     return path.read_text(encoding="utf-8")
 
 
+# Route 5 (routine): the complete reply that is sent to the patient WITHOUT human review.
+# Must answer from the FAQ and always contain the Doctolib link (guardrails enforce it).
 def auto_reply(llm: LLMClient, *, redacted_message: str, language: str, practice: Practice, faq: str) -> LLMResult[str]:
     task = ("Task: answer the inquiry completely using the practice information. "
             f"Always include the Doctolib booking link {practice.doctolib_url}.")
@@ -29,6 +31,11 @@ def auto_reply(llm: LLMClient, *, redacted_message: str, language: str, practice
     return _call(llm, system, redacted_message)
 
 
+# Only for SENSITIVE leads (route 3). They get an instant acknowledgment: a fixed template
+# (greeting, "we received it", sign-off) sent without human review. This function writes the one
+# optional paragraph in the middle of it: safe FAQ facts such as opening hours or the Doctolib link.
+# No greeting or sign-off because the template has them; answers NONE if nothing safe fits.
+# The real answer for staff is a separate text: staff_draft().
 def safe_info(llm: LLMClient, *, redacted_message: str, language: str, practice: Practice, faq: str) -> LLMResult[str]:
     task = ("Task: our team will answer this inquiry personally. Write ONE short paragraph "
             "(at most 60 words, no greeting, no sign-off) with general facts from the practice information "
@@ -39,6 +46,10 @@ def safe_info(llm: LLMClient, *, redacted_message: str, language: str, practice:
     return _call(llm, system, redacted_message)
 
 
+# Routes 3 and 4: a draft that staff review, edit and send themselves (never sent automatically).
+# Empathetic, leaves medical judgment and prices to the team. emergency=True (pain) makes it address the
+# concern and offer an urgent appointment; the emergency numbers are NOT repeated here, the instant
+# acknowledgment already carries them (chosen by code from the opening hours).
 def staff_draft(
     llm: LLMClient, *, redacted_message: str, language: str, practice: Practice, faq: str, emergency: bool,
 ) -> LLMResult[str]:
@@ -47,12 +58,14 @@ def staff_draft(
             "in touch personally. If the inquiry is about costs, explain that costs depend on the individual "
             "findings and that the team will prepare a personal cost estimate (Heil- und Kostenplan).")
     if emergency:
-        task += (f" The patient may be in pain: tell them to call the practice at {practice.phone}, and to call "
-                 "112 for life-threatening symptoms such as heavy bleeding or facial swelling with difficulty breathing.")
+        task += (" The patient may be in pain: show empathy and say the team will look for an appointment as soon "
+                 "as possible. Do not give medical advice and do not repeat emergency phone numbers; the patient "
+                 "already received them in our acknowledgment.")
     system = "\n\n".join([_base_rules(language, practice, faq), _email_format(language, practice), task])
     return _call(llm, system, redacted_message)
 
 
+# The AI only ever writes the {name} placeholder; the real name is inserted here, locally.
 def fill_name(text: str, name: str) -> str:
     name = name.strip()
     if name:

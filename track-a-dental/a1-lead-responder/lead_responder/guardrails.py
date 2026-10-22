@@ -31,7 +31,7 @@ DIAGNOSIS_TERMS = (
 )
 
 
-def check(text: str, practice: Practice, *, require_doctolib: bool, emergency: bool) -> list[str]:
+def check(text: str, practice: Practice, *, require_doctolib: bool) -> list[str]:
     violations: list[str] = []
     if require_doctolib and practice.doctolib_url not in text:
         violations.append("missing Doctolib link")
@@ -41,6 +41,4 @@ def check(text: str, practice: Practice, *, require_doctolib: bool, emergency: b
     found = [term for term in DIAGNOSIS_TERMS if term in lowered]
     if found:
         violations.append("diagnosis-like wording: " + ", ".join(found))
-    if emergency and "112" not in text and practice.phone not in text:
-        violations.append("missing emergency contact")
     return violations

@@ -45,13 +45,13 @@ def test_safe_info_allows_nothing_to_add(practice):
     assert "First line exactly" not in system  # a paragraph, not an email
 
 
-def test_staff_draft_mentions_emergency_only_when_needed(practice):
+def test_staff_draft_for_pain_asks_for_an_urgent_slot_without_repeating_emergency_numbers(practice):
     llm = FakeLLM(text=["a", "b"])
     drafter.staff_draft(llm, redacted_message="Zahnschmerzen", language="de", practice=practice, faq=FAQ, emergency=True)
     drafter.staff_draft(llm, redacted_message="Rechnung", language="de", practice=practice, faq=FAQ, emergency=False)
     emergency_call, normal_call = llm.text_calls
-    assert "112" in emergency_call["system"]
-    assert "112" not in normal_call["system"]
+    assert "in pain" in emergency_call["system"] and "in pain" not in normal_call["system"]
+    assert "112" not in emergency_call["system"] and "112" not in normal_call["system"]
 
 
 def test_load_faq_reads_practice_file():

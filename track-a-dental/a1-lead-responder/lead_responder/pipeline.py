@@ -96,7 +96,7 @@ def process_inquiry(
         text = _generate(lambda: drafter.auto_reply(
             llm, redacted_message=redacted, language=decision.language, practice=practice, faq=faq,
         ), run, EVENT_AUTO_REPLY_FAILED)
-        violations = guardrails.check(text, practice, require_doctolib=True, emergency=False) if text else []
+        violations = guardrails.check(text, practice, require_doctolib=True) if text else []
         if text and not violations:
             replies.append(GeneratedReply(Action.AUTO_REPLY, drafter.fill_name(text, name), text))
         else:
@@ -116,7 +116,7 @@ def process_inquiry(
             emergency=decision.emergency,
         ), run, EVENT_DRAFT_FAILED)
         if text:
-            warnings = guardrails.check(text, practice, require_doctolib=False, emergency=decision.emergency)
+            warnings = guardrails.check(text, practice, require_doctolib=False)
             replies.append(GeneratedReply(Action.DRAFT, drafter.fill_name(text, name), text, tuple(warnings)))
         else:
             decision = replace(decision, needs_manual_review=True)
@@ -157,7 +157,7 @@ def _acknowledgment(llm, redacted, name, classification, decision, practice, faq
             llm, redacted_message=redacted, language=decision.language, practice=practice, faq=faq,
         ), run, EVENT_SAFE_INFO_DROPPED)
         if text and text.strip().rstrip(".!").casefold() != drafter.NO_SAFE_INFO.casefold():
-            violations = guardrails.check(text, practice, require_doctolib=False, emergency=False)
+            violations = guardrails.check(text, practice, require_doctolib=False)
             if _PLACEHOLDER.search(text):
                 violations = [*violations, "contains a placeholder"]
             if violations:
