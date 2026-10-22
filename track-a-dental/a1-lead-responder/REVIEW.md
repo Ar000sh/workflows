@@ -23,7 +23,7 @@
 - [ ] Write down anything unclear and ask.
 
 ### 2. Review the eval results (about 1 hr) — Tariq
-- [ ] Open `track-a-dental/a1-lead-responder/eval_runs/drafts-20261022-2015.md` and read 5–10 replies. Check facts against `faq.md`, tone, and the "no diagnosis / no prices" rules. Note findings below.
+- [ ] Open the newest `track-a-dental/a1-lead-responder/eval_runs/drafts-*.md` (latest: `drafts-20261022-2323.md`) and read 5–10 replies. Check facts against `faq.md`, tone, and the "no diagnosis / no prices" rules. Note findings below.
 - [ ] Rule on label `i05` (expected `medical_question`, Haiku said `pain_emergency`; both sensitive, so routing is the same).
 - [ ] Skim all labels in `data/eval_inquiries.jsonl`. The spec says every label is reviewed by you before the score counts.
 - [ ] Review `data/faq.md` and `data/practice.yaml` for correctness.
@@ -32,7 +32,7 @@ Notes:
 -
 
 ### 3. Record the baseline — Claude
-- [ ] Fill the README "Eval results" section with the numbers above (date, models, cost).
+- [x] Fill the README "Eval results" section with the numbers above (date, models, cost). Done 2026-10-22, re-run after the router/guardrail/prompt changes.
 - [ ] Fix `.env.example` (`ANTHROPIC_API_KEY=` with an empty value).
 - [ ] Commit `PROJECT.md`, `.python-version`, README, `.env.example`, and this file.
 

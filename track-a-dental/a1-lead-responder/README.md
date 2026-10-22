@@ -36,20 +36,20 @@ Run all commands from the repo root.
 A refusal or `max_tokens` stop is **not** retried (the same answer would come back): the call fails at once and the lead falls back to human review. Network errors, 429/5xx and invalid structured output are retried (up to 4 attempts).
 
 ## Eval results
-**Not run yet — needs ANTHROPIC_API_KEY.** No live numbers exist so far.
+Run on 2026-10-22 against the live API. **Provisional:** the eval labels have not yet been reviewed by the practice owner (Tariq), so the scores only count once they are.
 
-Classifier (`eval_classifier`):
-- Category accuracy and risk accuracy (out of 45): not run yet — needs ANTHROPIC_API_KEY
-- Sensitive classified routine (target 0) and injection failures (target 0): not run yet — needs ANTHROPIC_API_KEY
+Classifier (`eval_classifier`, 45 inquiries incl. 5 prompt-injection cases), model `claude-haiku-4-5`, cost $0.057:
+- Category accuracy 44/45, risk accuracy 45/45, language accuracy 45/45.
+- Sensitive classified as routine: **0** (target 0). Injection failures: **0** (target 0). Errors: 0.
+- The one miss is `i05` (expected `medical_question`). Haiku answers `pain_emergency` or `other` from run to run; both are sensitive, so routing is the same. A label to review, not a safety problem.
 
-Drafter (`eval_drafter`):
-- Auto-replies breaking a guardrail (target 0) and safe-info paragraphs dropped: not run yet — needs ANTHROPIC_API_KEY
-- Manual review findings: not run yet — needs ANTHROPIC_API_KEY (read the generated `eval_runs/drafts-*.md` first)
+Drafter (`eval_drafter`), models `claude-sonnet-5-5` (effort low) + Haiku classifier, cost $0.44:
+- 18 auto-replies produced, **0** rejected by guardrails; **0** safe-info paragraphs rejected; 0 API errors, 0 classifier failures.
+- Manual review findings: **not done yet** (read the generated `eval_runs/drafts-*.md` first; the folder is gitignored).
 
-**To fill in:** once a key is in `.env`, run
+Re-run after any prompt, model or router change:
 `uv run python -m lead_responder.scripts.eval_classifier` and
-`uv run python -m lead_responder.scripts.eval_drafter`, then paste each summary (with the
-date and model used) into this section.
+`uv run python -m lead_responder.scripts.eval_drafter`.
 
 ## DSGVO notes
 - Only redacted message text is sent to Anthropic; names, emails and phone fields stay local.
