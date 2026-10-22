@@ -33,4 +33,5 @@ This repo is Tariq's lab and portfolio for learning **AI automation and AI workf
 ## Skills in this project
 - `/grill-me` (via `grilling`): stress-test the plan. Grill against the **Open questions** in PROJECT.md and write the conclusions back into it.
 - `/edge-case-probe`: probe a finished module for edge cases beyond unit tests (`.claude/skills/edge-case-probe`).
+- `/retro`: manual-only retrospective: sorts what hurt or worked into hooks, skills, rules or templates, challenges whether each applies everywhere, and prunes the setup (`.claude/skills/retro`; log in `devsetup/retro-log.md`).
 - `/run-evals`: re-run the live evals after a change and record the scores; asks before spending money (`.claude/skills/run-evals`).

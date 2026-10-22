@@ -8,6 +8,7 @@
 | 2026-10-22 | `.githooks/pre-commit` + `.claude/hooks/precommit.py` | git hook | Commits could carry a key or a broken suite; tests run in seconds | Runs for Tariq's commits too. Docs-only commits skip tests; a timeout asks Tariq to change the rule. **Enable once per clone:** `git config core.hooksPath .githooks` |
 | 2026-10-22 | `.claude/skills/edge-case-probe` (plan mode + attack mode with `attacker-prompt.md`) | skill + fresh subagent | 100% coverage hid a regex slowdown, a prompt-tag break-out and README drift; the author probing their own code only finds what they can think of | Same-context probe found 2 real bugs in A1. Attack mode is new: record in a follow-up what the fresh attacker finds that we missed |
 | 2026-10-22 | `.claude/skills/run-evals` | skill | Evals must be re-run after every prompt/model/router change; they cost money | New, not yet used |
+| 2026-10-23 | `.claude/skills/retro` (manual only) + `devsetup/retro-log.md` | skill | We did a 14-item retrospective by hand and want to repeat it whenever a layer ends or something goes badly, including pruning the setup | New; first use is the next layer |
 | 2026-10-22 | `devsetup/model-choice.md` | template | Choosing Haiku vs Sonnet needs evidence, not guesses | Haiku vs Sonnet drafter experiment recorded |
 | 2026-10-22 | `.gitattributes` (`eol=lf`) | config | Windows line-ending warnings on every commit | New |
 | 2026-10-22 | `.python-version` (3.12) | config | uv picked Python 3.15 and compiled Rust for minutes | Tests run in seconds |
