@@ -23,3 +23,5 @@ Thumbs.db
 
 # Eval outputs (read locally, summarized in READMEs)
 eval_runs/
+
+.coverage
