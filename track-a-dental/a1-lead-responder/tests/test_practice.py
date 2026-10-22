@@ -30,6 +30,11 @@ def test_closed_on_easter_monday(practice):
     assert not practice.is_open(at(2026, 4, 6, 10))  # public holiday, a weekday
 
 
+def test_closed_on_christmas_day_and_new_years_day(practice):
+    assert not practice.is_open(at(2026, 12, 25, 10))  # Friday, public holiday
+    assert not practice.is_open(at(2027, 1, 1, 10))    # Friday, public holiday
+
+
 def test_converts_other_timezones(practice):
     # 07:30 UTC is 09:30 in Hannover (summer time)
     assert practice.is_open(datetime(2026, 10, 5, 7, 30, tzinfo=timezone.utc))

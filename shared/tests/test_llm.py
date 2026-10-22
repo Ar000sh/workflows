@@ -93,6 +93,13 @@ def test_refusal_is_not_retried():
     assert len(fake.messages.calls) == 1
 
 
+def test_max_tokens_stop_is_not_retried():
+    client, fake, sleeps = make_client([fake_response(parsed=None, stop_reason="max_tokens")])
+    with pytest.raises(LLMError, match="max_tokens"):
+        parse_once(client)
+    assert len(fake.messages.calls) == 1 and sleeps == []
+
+
 def test_text_joins_text_blocks_and_skips_thinking():
     content = [
         SimpleNamespace(type="thinking", thinking=""),

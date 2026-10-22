@@ -33,7 +33,7 @@ Run all commands from the repo root.
 5. **Guardrails** check every AI text; a failing auto-reply goes to staff instead.
 
 ## Known limitation
-A refusal or `max_tokens` stop on the classifier's structured-output path is retried (up to 4 attempts) before falling back to human review.
+A refusal or `max_tokens` stop is **not** retried (the same answer would come back): the call fails at once and the lead falls back to human review. Network errors, 429/5xx and invalid structured output are retried (up to 4 attempts).
 
 ## Eval results
 **Not run yet — needs ANTHROPIC_API_KEY.** No live numbers exist so far.

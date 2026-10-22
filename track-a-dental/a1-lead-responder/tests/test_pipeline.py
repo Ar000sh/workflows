@@ -5,7 +5,7 @@ import pytest
 
 from lead_responder.models import Category, Classification, Risk, Urgency
 from lead_responder.pipeline import (
-    EVENT_AUTO_REPLY_FAILED, EVENT_AUTO_REPLY_REJECTED, EVENT_CLASSIFIER_FAILED, EVENT_MESSAGE_TOO_LONG,
+    EVENT_AUTO_REPLY_FAILED, EVENT_AUTO_REPLY_REJECTED, EVENT_CLASSIFIER_FAILED, EVENT_DRAFT_FAILED, EVENT_MESSAGE_TOO_LONG,
     EVENT_KEYWORD_OVERRIDE, EVENT_SAFE_INFO_DROPPED, EVENT_SAFE_INFO_REJECTED,
     process_inquiry,
 )
@@ -156,6 +156,14 @@ def test_keyword_net_stays_quiet_when_the_model_already_said_sensitive(practice)
     llm = FakeLLM(parse=[cls("pain_emergency", "sensitive")], text=["NONE", "Hallo {name}, rufen Sie uns an: " + practice.phone])
     result = run(llm, practice, message="Ich habe starke Schmerzen.")
     assert not any(e.startswith(EVENT_KEYWORD_OVERRIDE) for e in result.events)
+
+
+def test_staff_draft_api_failure_goes_to_manual_review(practice):
+    llm = FakeLLM(parse=[cls("pricing", "sensitive")], text=["NONE", LLMError("down")])
+    result = run(llm, practice, message="Was kostet ein Implantat?")
+    assert kinds(result) == [Action.ACKNOWLEDGMENT]            # patient still gets the acknowledgment
+    assert result.decision.needs_manual_review is True
+    assert any(e.startswith(EVENT_DRAFT_FAILED) for e in result.events)
 
 
 def test_safe_info_none_variants_mean_nothing_to_add(practice):
