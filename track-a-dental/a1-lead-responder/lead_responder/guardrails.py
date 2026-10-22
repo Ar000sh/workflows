@@ -31,6 +31,12 @@ DIAGNOSIS_TERMS = (
 )
 
 
+# Returns a list of problems found in an AI-written text (empty list = passed). Three checks:
+# Doctolib link present (auto-replies only), no prices, no diagnosis wording.
+# What the pipeline does with a failure: auto-reply is NOT sent (becomes a staff draft, lead downgraded
+# to sensitive); safe-info paragraph is dropped; staff draft is kept and staff see the warnings.
+# It cannot verify facts (e.g. invented opening hours) or catch prices written in words: that is what
+# the prompt rules, the evals and the human review are for.
 def check(text: str, practice: Practice, *, require_doctolib: bool) -> list[str]:
     violations: list[str] = []
     if require_doctolib and practice.doctolib_url not in text:
