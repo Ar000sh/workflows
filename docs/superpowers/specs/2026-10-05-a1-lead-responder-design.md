@@ -93,7 +93,7 @@ First project of the AI-automation learning plan. Two equal jobs:
 Lead saved, flagged `language_unsupported`, treated as sensitive; **DE+EN combined template acknowledgment** sent; **no AI draft** — staff handle it directly. No lead is ever dropped.
 
 ### 4.5 Auto-replies (routine leads)
-Sent immediately (`AUTO_REPLY_MODE=always`, default) or only outside opening hours (`outside_hours`; during opening hours routine leads get the standard instant acknowledgment and an AI draft in the staff queue). Auto-replies always include the Doctolib link.
+Sent immediately (`AUTO_REPLY_MODE=always`, default) or only outside opening hours (`outside_hours`; during opening hours routine leads get only the fixed instant acknowledgment and wait in the dashboard for staff, no AI text). Auto-replies always include the Doctolib link.
 
 ## 5. Data model
 **`leads`** — `id`, `created_at`, `channel` (`web_form`; later `whatsapp`, `email`), `name`, `email`, `phone` (nullable), `message`, `consent_at`, `category`, `risk`, `urgency`, `language`, `language_unsupported`, `ai_reason`, `needs_manual_review`, `status`, `anonymized_at`.

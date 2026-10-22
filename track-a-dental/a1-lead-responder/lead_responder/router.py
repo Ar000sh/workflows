@@ -91,9 +91,10 @@ def decide(
                         emergency=emergency, language_unsupported=False, needs_manual_review=False)
 
     # Route 4: routine, but the practice wants staff to answer during opening hours
-    # (AUTO_REPLY_MODE=outside_hours). The patient still gets the instant acknowledgment; staff get a draft.
+    # (AUTO_REPLY_MODE=outside_hours). The patient gets the fixed acknowledgment; staff are at their
+    # desks and answer personally, so no AI text is written at all.
     if auto_reply_mode == "outside_hours" and practice_open:
-        return Decision(Risk.ROUTINE, (Action.ACKNOWLEDGMENT, Action.DRAFT), language,
+        return Decision(Risk.ROUTINE, (Action.ACKNOWLEDGMENT,), language,
                         emergency=False, language_unsupported=False, needs_manual_review=False)
 
     # Route 5: routine. Auto-reply straight away (the pipeline still guardrail-checks the text
