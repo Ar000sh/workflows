@@ -18,8 +18,11 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Symlinks into .agents/skills (restore with: npx skills experimental_install)
-.claude/skills/
+# Symlinks into .agents/skills (restore with: npx skills experimental_install).
+# Our own skills are real folders and ARE committed (the two exceptions below).
+.claude/skills/*
+!.claude/skills/edge-case-probe/
+!.claude/skills/run-evals/
 
 # Eval outputs (read locally, summarized in READMEs)
 eval_runs/

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Enabled with: git config core.hooksPath .githooks
+# Runs secret scan + tests before every commit. See .claude/hooks/precommit.py.
+exec python "$(git rev-parse --show-toplevel)/.claude/hooks/precommit.py"

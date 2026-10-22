@@ -24,5 +24,5 @@ build-backend = "hatchling.build"
 packages = ["shared", "track-a-dental/a1-lead-responder/lead_responder"]
 
 [tool.pytest.ini_options]
-testpaths = ["shared/tests", "track-a-dental/a1-lead-responder/tests"]
+testpaths = ["shared/tests", "track-a-dental/a1-lead-responder/tests", ".claude/hooks"]
 addopts = "--import-mode=importlib"
