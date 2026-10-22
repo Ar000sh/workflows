@@ -149,6 +149,8 @@ def test_keyword_net_overrides_a_routine_classification(practice):
     assert kinds(result) == [Action.ACKNOWLEDGMENT, Action.DRAFT]
     assert result.decision.risk is Risk.SENSITIVE and result.decision.emergency is True
     assert Action.AUTO_REPLY not in kinds(result)
+    ack = result.replies[0].body
+    assert "112" in ack and practice.phone in ack     # the patient sees the emergency contacts
     assert any(e.startswith(EVENT_KEYWORD_OVERRIDE) for e in result.events)
 
 
