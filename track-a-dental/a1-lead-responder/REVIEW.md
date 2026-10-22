@@ -37,9 +37,9 @@ Notes:
 - [ ] Commit `PROJECT.md`, `.python-version`, README, `.env.example`, and this file.
 
 ### 4. Model experiment (first dev-setup template) — Claude runs, Tariq judges
-- [ ] Re-run the drafter eval with `DRAFTER_MODEL=claude-haiku-4-5` and compare with Sonnet side by side (quality first, cost second). Test the three drafter functions separately (`auto_reply`, `safe_info`, `staff_draft`).
+- [x] Re-run the drafter eval with `DRAFTER_MODEL=claude-haiku-4-5` and compare with Sonnet side by side. Done 2026-10-22: Haiku passes the guardrails at 2.4x lower cost but breaks soft rules in pain drafts; Sonnet stays. Not yet tested per function (`safe_info` only).
 - [ ] Try Sonnet with and without effort.
-- [ ] Write the result to `devsetup/model-choice.md`: task, model, effort, why, measured cost.
+- [x] Write the result to `devsetup/model-choice.md`: task, model, effort, why, measured cost.
 
 ### 5. Context experiment — Claude builds, Tariq judges
 Hypothesis: better context lets a cheaper model write as well as Sonnet.

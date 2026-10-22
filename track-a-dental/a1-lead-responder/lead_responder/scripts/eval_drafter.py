@@ -15,6 +15,7 @@ from datetime import datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
 from zoneinfo import ZoneInfo  # noqa: E402
 
+from lead_responder.config import CLASSIFIER_MODEL, DRAFTER_EFFORT, DRAFTER_MODEL  # noqa: E402
 from lead_responder.drafter import load_faq  # noqa: E402
 from lead_responder.evals import load_cases  # noqa: E402
 from lead_responder.pipeline import (  # noqa: E402
@@ -32,7 +33,8 @@ OUT_DIR = Path(__file__).resolve().parents[2] / "eval_runs"
 def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8")
     llm, practice, faq = LLMClient(), load_practice(), load_faq()
-    report = [f"# Drafter eval {datetime.now():%Y-%m-%d %H:%M}\n"]
+    report = [f"# Drafter eval {datetime.now():%Y-%m-%d %H:%M}\n",
+              f"Drafter model: {DRAFTER_MODEL} (effort: {DRAFTER_EFFORT or 'none'}) | classifier: {CLASSIFIER_MODEL}\n"]
     buckets = {name: [] for name in
                ("classifier_failed", "api_errors", "auto_rejected", "safe_rejected", "auto_produced")}
     total_cost = 0.0
