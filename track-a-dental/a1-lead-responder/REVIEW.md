@@ -77,6 +77,19 @@ Known gaps, in order of value, if we ever come back to them:
 3. Street plus house number (`...straße 12`).
 Not fixable by redaction: names of other people ("mein Sohn Max"), and the health content itself (Art. 9), which is why a real deployment needs the AVV with Anthropic. Every new pattern needs a "must not redact" test too. This is orientation, not legal advice.
 
+### Attack report 2026-10-23 (fresh agent, fakes only): what was fixed and what is parked
+Fixed with regression tests (`tests/test_attack_findings.py`): name field sanitised (`prompting.sanitize_name`); guardrails now check links, phone/email/ID numbers, placeholders and length on the FINAL text, for auto-replies and safe-info; safe-info that says "None ..."/"Keine" is dropped; keyword net widened (Zahnweh, Zahnfleischbluten, Eiter, gebrochen, toothache, ...); non-DE/EN leads always get emergency info and `needs_manual_review`.
+
+Parked, with reasons:
+- **Layer 4 requirements (not fixable in layers 1-3):**
+  - The API handler must wrap `process_inquiry`: any exception (not only LLMError) sends the route-1 acknowledgment and flags the lead. Validate `AUTO_REPLY_MODE` at start-up.
+  - Send the fixed acknowledgment FIRST, then do the AI calls, with an overall per-inquiry deadline. Today the "instant" acknowledgment waits for the slowest AI call (worst case about 13 minutes with 4 attempts per call).
+  - Duplicates and rate limits per sender, and never send to an address that did not come from the form field the visitor controls without limits (a stranger's address plus attacker text is a mail-bomb vector).
+- **Redactor leaks (add to "Parked: redactor hardening"):** `0511 12.34.56`, `0511 12:34 567` and `0511 9.12.2026` stay visible because the date/time preservation hides parts of a phone number; an en dash `0511–1234567` leaves `0511`; non-ASCII email names leave part of the name (`mü[EMAIL]`); obfuscated emails ("mueller at gmail dot com") are not caught.
+- **Guardrail gaps:** prices in words or other forms (`achtzig Euro`, `$80`, `CHF 80`, `99.- Euro`), free-of-charge promises ("kostenlos"), invisible characters, more diagnosis stems (`entzündet`, `Parodontose`, `inflamed`), and the false alarm on `Kariesprophylaxe`.
+- **Zero-width-only messages** pass the empty check and cost a classifier call; **cost accounting** ignores failed attempts and unpriced fallback models (matters once budget caps rely on `cost_usd`).
+- **24 and 31 December** count as open; ask the practice and put the answer into the FAQ and `practice.yaml`.
+
 ## Open decisions for Tariq
 - [ ] Monthly API budget (suggested $20 while learning); record in PROJECT.md Decisions log.
 - [ ] Keep `.agents/` and `skills-lock.json` (grilling skills installed for another tool)?

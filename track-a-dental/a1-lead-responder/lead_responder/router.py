@@ -27,11 +27,13 @@ ALWAYS_SENSITIVE = frozenset({
 # Deliberately broad. A false alarm only sends a draft to staff (with emergency info); a miss would
 # auto-reply to someone in pain. Matches word stems, case-insensitive, German and English.
 _URGENT_SIGNS = re.compile(
-    r"schmerz|\bweh\b|wehtun|pocht|\bblut|schwell|geschwollen|schwoll|notfall|notdienst|\bunfall"
+    r"schmerz|weh\b|wehtun|pocht|blut|schwell|geschwollen|schwoll|notfall|notdienst|\bunfall"
     r"|fieber|atemnot|luftnot|abgebrochen|ausgeschlagen|herausgefallen|abgesplittert|\b112\b"
     r"|\bpain|\bach(?:e|es|ing)\b|\bhurt|\bbleed|\bblood|swell|swollen|emergency|accident|fever"
     r"|broken|chipped|cracked|knocked out|fell out"
-    r"|wackel|locker|schluck|atem|schwindel|\bloose\b|swallow|breath|dizz",
+    r"|wackel|locker|schluck|atem|schwindel|\bloose\b|swallow|breath|dizz"
+    r"|toothache|entzünd|entzuend|infect|\beiter|\bpus\b|\bsore\b|throb|gebrochen|gesplittert|\braus\b|came out"
+    r"|verloren|\btaub|\bnumb(?:ness)?\b|schwanger|pregnan|brennt|killing me|nicht schlafen|can.?t sleep",
     re.IGNORECASE,
 )
 
@@ -81,9 +83,11 @@ def decide(
     emergency = classification.category is Category.PAIN_EMERGENCY or urgent_signs
 
     # Route 2: language is not DE/EN. Acknowledge in both languages, no AI draft; staff handle it.
+    # We cannot read the message and the keyword net only knows German/English, so we always include the
+    # emergency info (cheap) and flag the lead for a human (the dashboard must show it).
     if language not in SUPPORTED_LANGUAGES:
         return Decision(Risk.SENSITIVE, (Action.ACKNOWLEDGMENT,), COMBINED_LANGUAGE,
-                        emergency=emergency, language_unsupported=True, needs_manual_review=False)
+                        emergency=True, language_unsupported=True, needs_manual_review=True)
 
     # Route 3: sensitive (model says so, the category is always sensitive whatever the model says,
     # or the keyword net fired). Instant acknowledgment for the patient + AI draft for staff to approve.

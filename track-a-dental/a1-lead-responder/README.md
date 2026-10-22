@@ -30,7 +30,7 @@ Run all commands from the repo root.
 2. **Classify** (Haiku, structured output) → category, risk, urgency, language.
 3. **Route** (plain Python) → auto-reply, or acknowledgment + staff draft. A keyword safety net (pain, bleeding, swelling, Notfall, 112, ...) forces the sensitive route even if the classifier said routine.
 4. **Write** texts (Sonnet) from `data/faq.md`; acknowledgments are fixed templates plus an optional AI safe-info paragraph (guardrail-checked).
-5. **Guardrails** check every AI text; a failing auto-reply goes to staff instead.
+5. **Guardrails** check every AI text as the patient would read it (links, phone numbers, placeholders, prices, diagnosis words, length); a failing auto-reply goes to staff instead. The form's name is reduced to a short plain name or nothing before it is used in any reply.
 
 ## Known limitation
 A refusal or `max_tokens` stop is **not** retried (the same answer would come back): the call fails at once and the lead falls back to human review. Network errors, 429/5xx and invalid structured output are retried (up to 4 attempts).

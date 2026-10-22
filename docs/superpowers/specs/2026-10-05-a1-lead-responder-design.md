@@ -63,7 +63,7 @@ First project of the AI-automation learning plan. Two equal jobs:
 | `drafter` | Claude call (Sonnet). Writes (a) routine auto-replies, (b) the optional **safe-info paragraph** for acknowledgments, (c) drafts for staff. Uses `{name}` placeholder; name filled in locally after generation. | `shared/llm`, `faq.md` |
 | `templates` | Fixed acknowledgment texts (DE, EN, DE+EN combined), with emergency variants | `practice` |
 | `practice` | Reads structured practice config: opening hours, Niedersachsen public holidays, phone numbers, Notdienst info, Doctolib link; answers `is_open(now)` | config file |
-| `guardrails` | Deterministic checks on AI text: Doctolib link present, no price figures, no diagnosis terms (emergency numbers live in the fixed acknowledgment template, not in AI text) | — |
+| `guardrails` | Deterministic checks on the FINAL text (name filled in): booking link present as a whole link, no other links, no phone numbers/emails/IDs except the practice's own, no leftover placeholders, no price figures, no diagnosis terms, word limit (emergency numbers live in the fixed acknowledgment template, not in AI text) | — |
 | `router` | Plain Python decision: which replies to create and which status to set. No AI. | — |
 | `repository` | All DB reads/writes | Postgres |
 | `sender` | `send(reply)` returning a typed result: `accepted`, `failed` (retryable), or `timeout` (outcome unknown). Implementations `SmtpSender`, `N8nSender`. Retry policy lives here (§7). | SMTP / n8n |
@@ -90,7 +90,7 @@ First project of the AI-automation learning plan. Two equal jobs:
   - always → "for life-threatening symptoms (heavy bleeding, facial swelling with difficulty breathing) call **112**"
 
 ### 4.4 Unsupported languages (not DE/EN)
-Lead saved, flagged `language_unsupported`, treated as sensitive; **DE+EN combined template acknowledgment** sent; **no AI draft** — staff handle it directly. No lead is ever dropped.
+Lead saved, flagged `language_unsupported`, treated as sensitive; **DE+EN combined template acknowledgment** sent, always with the emergency info (the classifier and keyword net cannot be trusted in other languages); **no AI draft**; the lead is flagged `needs_manual_review` so the dashboard shows it. No lead is ever dropped.
 
 ### 4.5 Auto-replies (routine leads)
 Sent immediately (`AUTO_REPLY_MODE=always`, default) or only outside opening hours (`outside_hours`; during opening hours routine leads get the fixed instant acknowledgment (no AI paragraph) and an AI draft for staff to review and send). Auto-replies always include the Doctolib link.

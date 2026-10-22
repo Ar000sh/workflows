@@ -22,4 +22,4 @@
 | 13 | CRLF/LF warnings | `.gitattributes` | |
 | 14 | Custom agents | not built; criteria in CATALOG | "Not needed so far, not ruled out" |
 
-**Follow-ups:** the first fresh-agent attack on A1 (what did it find that we missed?), and checking after a few commits whether the pre-commit gate felt too slow.
+**Follow-ups:** ~~the first fresh-agent attack on A1~~ done 2026-10-23: 13 findings, 5 fixed, rest parked (see CATALOG and A1 REVIEW.md). Still open: does the pre-commit gate feel too slow after a few commits? Do the stricter guardrails raise the false-alarm rate on real drafts (re-run the drafter eval, `/run-evals`)?

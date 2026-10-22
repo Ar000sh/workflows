@@ -4,7 +4,8 @@ from lead_responder.guardrails import check
 
 
 def ok_text(practice):
-    return f"Hallo {{name}}, Sie können online buchen: {practice.doctolib_url}. Bis bald!"
+    # check() reads the FINAL text (name already filled in), so no {name} placeholder is left.
+    return f"Hallo Anna, Sie können online buchen: {practice.doctolib_url}. Bis bald!"
 
 
 def test_clean_text_passes(practice):

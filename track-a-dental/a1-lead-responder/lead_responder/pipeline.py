@@ -14,6 +14,7 @@ from lead_responder import classifier, drafter, guardrails, templates
 from lead_responder.config import AUTO_REPLY_MODE, MAX_MESSAGE_CHARS
 from lead_responder.models import Classification, Risk
 from lead_responder.practice import Practice
+from lead_responder.prompting import sanitize_name
 from lead_responder.redactor import redact
 from lead_responder.router import (
     ALWAYS_SENSITIVE, Action, Decision, decide, downgrade_failed_auto_reply, mentions_urgent_signs,
@@ -31,7 +32,11 @@ EVENT_AUTO_REPLY_REJECTED = "auto-reply rejected"      # guardrail violation
 EVENT_DRAFT_FAILED = "draft failed"
 EVENT_KEYWORD_OVERRIDE = "keyword safety net"          # message mentions pain/injury, classifier said routine
 
-_PLACEHOLDER = re.compile(r"[{}]|\[Name\]", re.IGNORECASE)
+# The prompt asks for exactly NONE when there is nothing safe to add; models also answer "None of ...", "Keine." etc.
+_NOTHING_TO_ADD = re.compile(r"\s*(none|keine?|nothing)\b", re.IGNORECASE)
+# The format rule says at most 120 words (auto-reply) and 60 (safe-info); the limits leave some slack.
+AUTO_REPLY_MAX_WORDS = 200
+SAFE_INFO_MAX_WORDS = 100
 _ORDER = {Action.AUTO_REPLY: 0, Action.ACKNOWLEDGMENT: 1, Action.DRAFT: 2}
 
 
@@ -81,6 +86,8 @@ def process_inquiry(
     # Step 0: setup. Reject empty input; _Run collects the cost and the events (warnings) of this one inquiry.
     if not message.strip():
         raise ValueError("message is empty")
+    # The name goes into replies nobody reviews: reduce it to a short plain name or nothing at all.
+    name = sanitize_name(name)
     run = _Run()
     practice_open = practice.is_open(now)
     # Step 1: redact. Contact details and ID numbers are removed; the AI only ever sees this version.
@@ -106,14 +113,17 @@ def process_inquiry(
         text = _generate(lambda: drafter.auto_reply(
             llm, redacted_message=redacted, language=decision.language, practice=practice, faq=faq,
         ), run, EVENT_AUTO_REPLY_FAILED)
-        violations = guardrails.check(text, practice, require_doctolib=True) if text else []
+        # The guardrails read the FINAL body (name filled in), because that is what the patient would get.
+        body = drafter.fill_name(text, name) if text else ""
+        violations = (guardrails.check(body, practice, require_doctolib=True, max_words=AUTO_REPLY_MAX_WORDS)
+                      if text else [])
         if text and not violations:
-            replies.append(GeneratedReply(Action.AUTO_REPLY, drafter.fill_name(text, name), text))
+            replies.append(GeneratedReply(Action.AUTO_REPLY, body, text))
         else:
             if text:
                 # Keep the failed text as a draft so staff can see and fix it.
                 run.event(EVENT_AUTO_REPLY_REJECTED, "; ".join(violations))
-                replies.append(GeneratedReply(Action.DRAFT, drafter.fill_name(text, name), text, tuple(violations)))
+                replies.append(GeneratedReply(Action.DRAFT, body, text, tuple(violations)))
             decision = downgrade_failed_auto_reply(decision)
 
     # Step 4b: acknowledgment (fixed template, plus an AI safe-info paragraph for sensitive leads).
@@ -129,8 +139,9 @@ def process_inquiry(
             emergency=decision.emergency,
         ), run, EVENT_DRAFT_FAILED)
         if text:
-            warnings = guardrails.check(text, practice, require_doctolib=False)
-            replies.append(GeneratedReply(Action.DRAFT, drafter.fill_name(text, name), text, tuple(warnings)))
+            body = drafter.fill_name(text, name)
+            warnings = guardrails.check(body, practice, require_doctolib=False)
+            replies.append(GeneratedReply(Action.DRAFT, body, text, tuple(warnings)))
         else:
             decision = replace(decision, needs_manual_review=True)
 
@@ -171,10 +182,8 @@ def _acknowledgment(llm, redacted, name, classification, decision, practice, faq
         text = _generate(lambda: drafter.safe_info(
             llm, redacted_message=redacted, language=decision.language, practice=practice, faq=faq,
         ), run, EVENT_SAFE_INFO_DROPPED)
-        if text and text.strip().rstrip(".!").casefold() != drafter.NO_SAFE_INFO.casefold():
-            violations = guardrails.check(text, practice, require_doctolib=False)
-            if _PLACEHOLDER.search(text):
-                violations = [*violations, "contains a placeholder"]
+        if text and not _NOTHING_TO_ADD.match(text):
+            violations = guardrails.check(text, practice, require_doctolib=False, max_words=SAFE_INFO_MAX_WORDS)
             if violations:
                 run.event(EVENT_SAFE_INFO_REJECTED, "; ".join(violations))
             else:
