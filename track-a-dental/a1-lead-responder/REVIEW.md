@@ -4,7 +4,7 @@
 > Last updated: 2026-10-23
 
 ## Where we are
-- A1 layers 1–3 (core logic) built; 120 mocked unit tests pass; Python pinned to 3.12 (`.python-version`).
+- A1 layers 1–3 (core logic) built; the mocked unit tests pass; Python pinned to 3.12 (`.python-version`).
 - First live runs on 2026-10-22 (Haiku 4.5 classifier, Sonnet 5.5 drafter, effort low):
   - Classifier: category 44/45, risk 45/45, language 45/45, sensitive→routine **0**, injection failures **0**, cost $0.057.
   - Drafter: 18 auto-replies, 0 guardrail rejections, 0 API errors, cost $0.445 (about $0.01 per inquiry).
@@ -72,12 +72,18 @@ Idea: the assistant gets smarter with use, with a human approving every change.
 
 ### 4a notes: to decide or know (2026-10-23)
 - [ ] **Error is cleared on every status change.** `set_reply_status` sets `error` to the given value or None each time, so a `failed` then `approved` retry loses the "may have been sent" warning. Decide in 4b/4c: clear only on `sent`, or only when `error` is passed.
-- [ ] **Retention does not blank `replies.error`.** After a failed send it may hold the recipient address. Decide when 4b writes it (store no address there, or blank it in retention).
+- [x] **Retention blanks `leads.ai_reason` and `replies.error`** (done in the final-review fixes; `error` may hold a recipient address, `ai_reason` is free text about the patient).
 - [ ] **Length limits are CHECK constraints** on text columns (`char_length`), not `VARCHAR(n)`. Overflow raises `IntegrityError`; the repository checks first and raises a clear `ValueError`.
 - [ ] **Sessions:** `make_session_factory` uses `expire_on_commit=False`. A caller whose Session keeps the default (`True`) gets expired objects back from the repository (attributes reload on access).
 - [ ] **Duplicates are only suppressed, not blocked:** the advisory lock plus the 2-minute window stops identical simultaneous or quick repeat submissions; it is not rate limiting.
 
 ### Parked: 4a small items
+- **"sent is final" is not enforced:** `set_reply_status` allows any transition, including `sent` -> `failed`. Spec section 7 and section 14 rows 11 and 16 need a compare-and-set (`expected=`) or a transition table. Decide it together with the error-clearing question above.
+- **One commit per repository method** vs spec section 14 row 13 (audit row in the same transaction): 4c must add audit writes inside the repository methods, or a no-commit / unit-of-work variant.
+- **Retention can blank a pending draft.** The 4b sender and the 4d approve action must refuse leads with `anonymized_at` set (or an empty email).
+- **`run_retention.py` uses `Session(engine)`, not `make_session_factory`.** 4b must use `make_session_factory`, one session per request.
+- Dedup lower-cases the email but does not strip it (leave to 4b form validation). `set_classification` stores the model's raw language (cut to the column width), not the normalised `decision.language`.
+- `DATABASE_URL_TEST` could point at the dev database and the tests run `drop_all`: consider a guard that the database name ends in `_test`. Two checkouts running the suite at once share `leads_test`. Length-CHECK drift is not caught by `compare_metadata`.
 - Retention updates with `IN (ids)`: on a huge backlog (over 65535 leads at once) Postgres' bind-parameter limit would fail. Fix by batching if volumes ever need it.
 - The 120 s duplicate window has no upper bound on lead timestamps by design (a lead stamped later than `now` still counts); revisit if clocks can drift.
 - `run_retention` does not call `engine.dispose()`; harmless for a one-shot script, add it if the script grows.

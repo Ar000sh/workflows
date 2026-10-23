@@ -96,9 +96,9 @@ Lead saved, flagged `language_unsupported`, treated as sensitive; **DE+EN combin
 Sent immediately (`AUTO_REPLY_MODE=always`, default) or only outside opening hours (`outside_hours`; during opening hours routine leads get the fixed instant acknowledgment (no AI paragraph) and an AI draft for staff to review and send). Auto-replies always include the Doctolib link.
 
 ## 5. Data model
-**`leads`** — `id`, `created_at`, `channel` (`web_form`; later `whatsapp`, `email`), `name`, `email`, `phone` (nullable), `message`, `consent_at`, `category`, `risk`, `urgency`, `language`, `language_unsupported`, `ai_reason`, `needs_manual_review`, `status`, `anonymized_at`.
+**`leads`** — `id`, `created_at`, `channel` (`web_form`; later `whatsapp`, `email`), `name`, `email`, `phone` (nullable), `message`, `consent_at`, `category`, `risk`, `urgency`, `language`, `language_unsupported`, `ai_reason`, `needs_manual_review`, `status`, `anonymized_at`, `dedup_key` (added in 4a: sha256 hex of lower-cased email + newline + stripped message, used for duplicate detection; nullable, blanked by retention).
 
-**`replies`** — `id`, `lead_id`, `kind` (`auto_reply` | `acknowledgment` | `draft`), `ai_body`, `body`, `status` (`drafted` | `approved` | `sent` | `rejected` | `failed`), `error`, `approved_by` (→ `staff_users.id`), `sent_at`, `created_at`.
+**`replies`** — `id`, `lead_id`, `kind` (`auto_reply` | `acknowledgment` | `draft`), `ai_body`, `body`, `status` (`drafted` | `approved` | `sent` | `rejected` | `failed`), `error`, `approved_by` (→ `staff_users.id`), `sent_at`, `created_at`, `edited` (added in 4a: boolean, nullable; true when staff changed the AI draft, keeps the "approved unchanged" statistic after retention blanks the texts).
 
 **`staff_users`** — `id`, `name`, `email`, `password_hash` (argon2), `failed_attempts`, `locked_until`, `created_at`, `disabled_at`.
 
@@ -128,7 +128,7 @@ new → classified ─┬─ routine   → auto_replied ────────
 ## 6. DSGVO handling (lightweight, from day one)
 - Data minimization: phone optional; only **redacted message text** is sent to Anthropic — never name, email or phone fields.
 - Mandatory consent checkbox; `consent_at` stored. Form rejects submissions without consent.
-- Retention job anonymizes personal fields (`name`, `email`, `phone`, `message`) after `RETENTION_DAYS` (default 90); statistics and audit log (which references IDs, not personal data) retained.
+- Retention job anonymizes personal fields after `RETENTION_DAYS` (default 90): on the lead `name`, `email`, `phone`, `message`, `dedup_key` and `ai_reason` (free text about the patient); on its replies `body` (becomes `[anonymized]`), `ai_body` and `error` (may hold a recipient address). Statistics (category, risk, urgency, language, statuses, timestamps, `edited`) and the audit log (which references IDs, not personal data) are retained.
 - Audit log provides accountability for who sent what to which patient.
 - README section listing data processors (Anthropic, email provider, host) and the DPAs/AVVs a real client deployment would require, plus the names-in-free-text limitation. Legal points are orientation, not legal advice; Anthropic's current DPA/data-handling terms to be checked before any real client use.
 
@@ -191,10 +191,10 @@ Written before building layer 4. Status: **design** = handled by the design belo
 
 | # | Risk | What happens / what stops it | Part | Status |
 |---|---|---|---|---|
-| 1 | Two identical submissions race past the duplicate check | Duplicate check and insert run atomically under a Postgres advisory lock | 4a | test |
-| 2 | Hostile text breaks the database (NUL byte, SQL quotes, emoji, huge fields) | NUL stripped, parameterized SQL only, `CHECK` length limits as a last defence | 4a | test |
-| 3 | Personal data survives retention (reply bodies repeat the name, ids only half cleaned) | Anonymization also blanks `replies.body`/`ai_body`; an `edited` flag keeps the "approved unchanged" statistic; idempotent; exact 90-day boundary tested | 4a | test |
-| 4 | Naive or wrong-timezone timestamps | Only timezone-aware datetimes accepted; `timestamptz` columns | 4a | test |
+| 1 | Two identical submissions race past the duplicate check | Duplicate check and insert run atomically under a Postgres advisory lock | 4a | done (4a) |
+| 2 | Hostile text breaks the database (NUL byte, SQL quotes, emoji, huge fields) | NUL stripped, parameterized SQL only, `CHECK` length limits as a last defence | 4a | done (4a) |
+| 3 | Personal data survives retention (reply bodies repeat the name, ids only half cleaned) | Anonymization also blanks `replies.body`/`ai_body`; an `edited` flag keeps the "approved unchanged" statistic; idempotent; exact 90-day boundary tested; also `leads.ai_reason`, `leads.dedup_key` and `replies.error` | 4a | done (4a) |
+| 4 | Naive or wrong-timezone timestamps | Only timezone-aware datetimes accepted; `timestamptz` columns | 4a | done (4a) |
 | 5 | Database down or slow when a lead arrives | Intake returns an error to the form; no half-saved state; nothing sent | 4b | test |
 | 6 | Lead saved, then the process dies mid-pipeline | Status stays `new`/`classified`; a startup sweep re-queues leads with no reply after N minutes | 4b | test |
 | 7 | Any exception (not only LLMError) in the pipeline leaves the patient without a response | Handler wraps `process_inquiry`; any exception sends the route-1 acknowledgment and flags the lead | 4b | test |
