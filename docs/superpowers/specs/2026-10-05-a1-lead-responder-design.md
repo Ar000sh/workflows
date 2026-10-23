@@ -96,7 +96,7 @@ Lead saved, flagged `language_unsupported`, treated as sensitive; **DE+EN combin
 Sent immediately (`AUTO_REPLY_MODE=always`, default) or only outside opening hours (`outside_hours`; during opening hours routine leads get the fixed instant acknowledgment (no AI paragraph) and an AI draft for staff to review and send). Auto-replies always include the Doctolib link.
 
 ## 5. Data model
-**`leads`** — `id`, `created_at`, `channel` (`web_form`; later `whatsapp`, `email`), `name`, `email`, `phone` (nullable), `message`, `consent_at`, `category`, `risk`, `urgency`, `language`, `language_unsupported`, `ai_reason`, `needs_manual_review`, `status`, `anonymized_at`, `dedup_key` (added in 4a: sha256 hex of lower-cased email + newline + stripped message, used for duplicate detection; nullable, blanked by retention).
+**`leads`** — `id`, `created_at`, `channel` (`web_form`; later `whatsapp`, `email`), `name`, `email`, `phone` (nullable), `message`, `consent_at`, `category`, `risk`, `urgency`, `language`, `language_unsupported`, `ai_reason`, `needs_manual_review`, `status`, `anonymized_at`, `dedup_key` (added in 4a: sha256 hex of lower-cased email + NUL character (never present in cleaned text) + stripped message, used for duplicate detection; nullable, blanked by retention).
 
 **`replies`** — `id`, `lead_id`, `kind` (`auto_reply` | `acknowledgment` | `draft`), `ai_body`, `body`, `status` (`drafted` | `approved` | `sent` | `rejected` | `failed`), `error`, `approved_by` (→ `staff_users.id`), `sent_at`, `created_at`, `edited` (added in 4a: boolean, nullable; true when staff changed the AI draft, keeps the "approved unchanged" statistic after retention blanks the texts).
 
@@ -128,7 +128,7 @@ new → classified ─┬─ routine   → auto_replied ────────
 ## 6. DSGVO handling (lightweight, from day one)
 - Data minimization: phone optional; only **redacted message text** is sent to Anthropic — never name, email or phone fields.
 - Mandatory consent checkbox; `consent_at` stored. Form rejects submissions without consent.
-- Retention job anonymizes personal fields after `RETENTION_DAYS` (default 90): on the lead `name`, `email`, `phone`, `message`, `dedup_key` and `ai_reason` (free text about the patient); on its replies `body` (becomes `[anonymized]`), `ai_body` and `error` (may hold a recipient address). Statistics (category, risk, urgency, language, statuses, timestamps, `edited`) and the audit log (which references IDs, not personal data) are retained.
+- Retention job anonymizes personal fields after `RETENTION_DAYS` (default 90): on the lead `name`, `email`, `phone`, `message`, `dedup_key` and `ai_reason` (free text about the patient); on its replies `body` (becomes `[anonymized]`), `ai_body` and `error` (may hold a recipient address). Retention runs in batches (one short transaction each) and also sweeps leftovers on already anonymized leads; the repository refuses new replies and classifications for them. Statistics (category, risk, urgency, language, statuses, timestamps, `edited`) and the audit log (which references IDs, not personal data) are retained.
 - Audit log provides accountability for who sent what to which patient.
 - README section listing data processors (Anthropic, email provider, host) and the DPAs/AVVs a real client deployment would require, plus the names-in-free-text limitation. Legal points are orientation, not legal advice; Anthropic's current DPA/data-handling terms to be checked before any real client use.
 

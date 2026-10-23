@@ -80,11 +80,11 @@ Idea: the assistant gets smarter with use, with a human approving every change.
 ### Parked: 4a small items
 - **"sent is final" is not enforced:** `set_reply_status` allows any transition, including `sent` -> `failed`. Spec section 7 and section 14 rows 11 and 16 need a compare-and-set (`expected=`) or a transition table. Decide it together with the error-clearing question above.
 - **One commit per repository method** vs spec section 14 row 13 (audit row in the same transaction): 4c must add audit writes inside the repository methods, or a no-commit / unit-of-work variant.
-- **Retention can blank a pending draft.** The 4b sender and the 4d approve action must refuse leads with `anonymized_at` set (or an empty email).
+- **Retention can blank a pending draft.** (Since the attack fix wave `add_reply` and `set_classification` also raise `ValueError` for an anonymized lead; `set_reply_status` stays allowed and its `error` is swept on the next retention run.) The 4b sender and the 4d approve action must refuse leads with `anonymized_at` set (or an empty email).
 - **`run_retention.py` uses `Session(engine)`, not `make_session_factory`.** 4b must use `make_session_factory`, one session per request.
 - Dedup lower-cases the email but does not strip it (leave to 4b form validation). `set_classification` stores the model's raw language (cut to the column width), not the normalised `decision.language`.
 - `DATABASE_URL_TEST` could point at the dev database and the tests run `drop_all`: consider a guard that the database name ends in `_test`. Two checkouts running the suite at once share `leads_test`. Length-CHECK drift is not caught by `compare_metadata`.
-- Retention updates with `IN (ids)`: on a huge backlog (over 65535 leads at once) Postgres' bind-parameter limit would fail. Fix by batching if volumes ever need it.
+- ~~Retention updates with `IN (ids)`~~ fixed in the attack fix wave: batches of `RETENTION_BATCH_SIZE` (5000), one transaction each.
 - The 120 s duplicate window has no upper bound on lead timestamps by design (a lead stamped later than `now` still counts); revisit if clocks can drift.
 - `run_retention` does not call `engine.dispose()`; harmless for a one-shot script, add it if the script grows.
 
@@ -113,3 +113,15 @@ Parked, with reasons:
 - [ ] Monthly API budget (suggested $20 while learning); record in PROJECT.md Decisions log.
 - [ ] Keep `.agents/` and `skills-lock.json` (grilling skills installed for another tool)?
 - [ ] Add a "what enters the dev setup?" step to the definition of done?
+
+### Attack probe of layer 4a, 2026-10-23 (fresh agent): fixed and parked
+Fixed with regression tests (`tests/db/`): F3 dedup key joined email and message with a newline, so two different patients could collide (separator is now NUL, computed after cleaning); F1 retention used one `IN (ids)` list (65535 bind-parameter limit), now batched; F2 personal data could re-enter an anonymized lead (guards in `add_reply` / `set_classification`, plus a retention sweep of leftovers); F6a NUL in `language`.
+
+Parked (all from the 2026-10-23 attack probe):
+- **F4 stale identity map:** `expire_on_commit=False` plus `session.get` returns cached objects, so a long-lived session can show PII after retention and drop writes. 4b: short sessions per request, `populate_existing=True` in lookups.
+- **F5 no reply state machine** (see above): also `sent` -> `sent` moves `sent_at`, and two sessions can both mark a reply `SENT`.
+- **F6b no length cap** on `ai_reason`, reply `body`, `ai_body` and `error` (50 MB accepted); lone surrogates raise `UnicodeEncodeError`.
+- **F7 retention blocks behind row locks** (no `lock_timeout`; consider `SKIP LOCKED` / `lock_timeout`), and `get_lead` leaves a transaction open.
+- **F8 read methods do not roll back;** wrong-type ids raise `DataError` / `AttributeError`, not `ValueError`.
+- **F9 pre-commit gate:** `git mv code.py code.md` is treated as docs-only (add `--no-renames`); the `.env` block does not cover `.envrc`, `prod.env`, `.ENV`.
+- **F10 misc:** channel not validated; empty name/email/message accepted; `anonymize_older_than` accepts a future cutoff (wipes everything); no per-lead erasure method (DSGVO Art. 17); `audit_log.details` is not blanked by retention; `alembic downgrade base` drops all data; docker-compose publishes 5433 on all interfaces with password `leads` (dev only, bind to 127.0.0.1 before any shared host); dedup is bypassable by spelling variants until 4b rate limits.
