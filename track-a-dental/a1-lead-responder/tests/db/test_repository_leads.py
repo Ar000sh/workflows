@@ -1,4 +1,5 @@
 """Leads repository tests: duplicate detection, hostile text, validation, status updates."""
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
@@ -8,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from lead_responder.db.models import Lead, LeadStatus
 from lead_responder.models import Category, Classification, Risk, Urgency
-from lead_responder.repository import Repository
+from lead_responder.repository import Repository, _dedup_key, _lock_id
 from lead_responder.router import Action, Decision
 
 NOW = datetime(2026, 10, 23, 10, 0, tzinfo=UTC)
@@ -65,14 +66,46 @@ def test_different_message_is_a_new_lead(session):
 
 
 def test_two_sessions_racing_create_exactly_one_lead(engine, session):
-    # Each thread has its own Session (= own connection); the advisory lock must serialise them.
+    # Barrier makes both threads start together; each has its own Session (= own connection).
+    barrier = threading.Barrier(2)
+
     def submit(_):
         with Session(engine, expire_on_commit=False) as s:
+            barrier.wait(timeout=5)
             return Repository(s).create_lead_if_new(**payload())[1]
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(submit, range(2)))
     assert sorted(results) == [False, True]
+    assert count_leads(session) == 1
+
+
+# Deterministic proof that the advisory lock is what serialises: the test itself holds the lock,
+# so the worker MUST block until we commit. Without the lock line the worker would finish at once.
+def test_create_blocks_on_the_advisory_lock_until_holder_commits(engine, session):
+    p = payload()
+    key = _dedup_key(p["email"], p["message"])
+    result = {}
+
+    def worker():
+        with Session(engine, expire_on_commit=False) as s:
+            result["created"] = Repository(s).create_lead_if_new(**p)[1]
+
+    with Session(engine, expire_on_commit=False) as holder:
+        holder.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _lock_id(key)})
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join(timeout=0.3)
+        assert t.is_alive(), "worker did not wait for the advisory lock"
+        # The holder inserts the matching lead, then commits (releasing the lock).
+        holder.add(Lead(
+            name=p["name"], email=p["email"], message=p["message"], consent_at=NOW,
+            created_at=NOW, status="new", dedup_key=key,
+        ))
+        holder.commit()
+    t.join(timeout=5)
+    assert not t.is_alive()
+    assert result["created"] is False  # saw the holder's committed row
     assert count_leads(session) == 1
 
 
@@ -175,3 +208,24 @@ def test_set_lead_status_rejects_a_plain_string(session):
         repo.set_lead_status(lead.id, "bogus")
     with pytest.raises(ValueError):
         repo.set_lead_status(lead.id, "done")  # even a valid value must be the enum
+
+
+def test_exactly_120_seconds_is_a_duplicate_and_121_is_new(session):
+    repo = Repository(session)
+    first, _ = repo.create_lead_if_new(**payload())
+    same, created = repo.create_lead_if_new(**payload(now=NOW + timedelta(seconds=120)))
+    assert created is False and same.id == first.id
+    _, created = repo.create_lead_if_new(**payload(now=NOW + timedelta(seconds=121)))
+    assert created is True
+
+
+def test_unknown_lead_id_raises_lookup_error(session):
+    repo = Repository(session)
+    decision = Decision(
+        risk=Risk.ROUTINE, actions=(Action.AUTO_REPLY,), language="de", emergency=False,
+        language_unsupported=False, needs_manual_review=False,
+    )
+    with pytest.raises(LookupError):
+        repo.set_lead_status(999, LeadStatus.DONE)
+    with pytest.raises(LookupError):
+        repo.set_classification(999, classification=None, decision=decision)

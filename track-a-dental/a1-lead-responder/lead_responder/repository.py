@@ -76,6 +76,7 @@ class Repository:
         key = _dedup_key(email, message)
         try:
             self.session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _lock_id(key)})
+            # Deliberately no upper bound on created_at: a lead timestamped later than `now` still counts.
             existing = self.session.scalar(
                 select(Lead)
                 .where(Lead.dedup_key == key, Lead.created_at >= now - DUPLICATE_WINDOW)
