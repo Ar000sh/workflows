@@ -193,6 +193,44 @@ def test_set_classification_with_none_keeps_decision_flags(session):
     assert updated.category is None
 
 
+def _decision() -> Decision:
+    return Decision(
+        risk=Risk.SENSITIVE, actions=(Action.ACKNOWLEDGMENT,), language="de+en", emergency=False,
+        language_unsupported=True, needs_manual_review=True,
+    )
+
+
+# A model-made language like "undetermined" is longer than the column: it is cut, not a DataError,
+# and the router's decision flags are still stored.
+def test_set_classification_truncates_overlong_language_and_keeps_flags(session):
+    repo = Repository(session)
+    lead, _ = repo.create_lead_if_new(**payload())
+    cls = Classification(
+        category=Category.APPOINTMENT, risk=Risk.ROUTINE, urgency=Urgency.NORMAL,
+        language="undetermined", reason="x",
+    )
+    updated = repo.set_classification(lead.id, classification=cls, decision=_decision())
+    session.expire_all()
+    got = repo.get_lead(updated.id)
+    assert got.language == "undetermin"
+    assert got.needs_manual_review is True and got.language_unsupported is True
+
+
+# A NUL byte in the model's reason is dropped (like in messages), flags still stored.
+def test_set_classification_strips_nul_from_reason_and_keeps_flags(session):
+    repo = Repository(session)
+    lead, _ = repo.create_lead_if_new(**payload())
+    cls = Classification(
+        category=Category.APPOINTMENT, risk=Risk.ROUTINE, urgency=Urgency.NORMAL,
+        language="de", reason="a" + chr(0) + "b",
+    )
+    repo.set_classification(lead.id, classification=cls, decision=_decision())
+    session.expire_all()
+    got = repo.get_lead(lead.id)
+    assert got.ai_reason == "ab"
+    assert got.needs_manual_review is True and got.language_unsupported is True
+
+
 def test_set_lead_status_updates_and_persists(session):
     repo = Repository(session)
     lead, _ = repo.create_lead_if_new(**payload())

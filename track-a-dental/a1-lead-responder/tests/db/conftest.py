@@ -26,6 +26,16 @@ def alembic_config(url: str) -> AlembicConfig:
     return cfg
 
 
+# Skip text for an unreachable database: the required prefix and fix hint, plus WHAT went wrong
+# (exception class and first line of its message), so a wrong password is not mistaken for "not started".
+def skip_message(url: str, error: Exception) -> str:
+    first_line = (str(error).strip().splitlines() or [""])[0]
+    return (
+        f"Postgres not reachable at {url}: run 'docker compose up -d postgres' in track-a-dental/a1-lead-responder"
+        f" ({type(error).__name__}: {first_line})"
+    )
+
+
 # One engine for the whole run. Skips if Postgres is down, otherwise rebuilds the
 # schema from scratch through the real migrations (so the migrations are tested too).
 @pytest.fixture(scope="session")
@@ -37,8 +47,8 @@ def engine():
     try:
         with probe.connect() as conn:
             conn.execute(text("SELECT 1"))
-    except Exception:
-        pytest.skip(f"Postgres not reachable at {url}: run 'docker compose up -d postgres' in track-a-dental/a1-lead-responder")
+    except Exception as e:
+        pytest.skip(skip_message(url, e))
     finally:
         probe.dispose()
     # Drop everything (including alembic_version) so upgrade starts from zero.

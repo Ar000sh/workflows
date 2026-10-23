@@ -1,8 +1,14 @@
 """Alembic environment: connects to config.DATABASE_URL and compares against Base.metadata."""
 from alembic import context
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
-from lead_responder import config
+# Before importing config, so a DATABASE_URL in .env applies to alembic exactly as it does to the
+# app and scripts/run_retention.py. load_dotenv() searches upward from THIS file, not from the cwd,
+# so it behaves the same wherever alembic is started.
+load_dotenv()
+
+from lead_responder import config  # noqa: E402
 from lead_responder.db.models import Base
 
 target_metadata = Base.metadata

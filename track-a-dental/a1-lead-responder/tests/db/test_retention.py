@@ -33,6 +33,7 @@ def test_personal_fields_are_blanked_and_statistics_kept(session):
     repo = Repository(session)
     lead = make_lead(repo, CUTOFF - timedelta(days=1))
     lead.category, lead.risk, lead.urgency, lead.language = "appointment", "low", "normal", "de"
+    lead.ai_reason = "Patient nennt Zahnschmerzen"  # free text about the patient: must go
     session.commit()
     repo.set_lead_status(lead.id, LeadStatus.REPLIED)
 
@@ -42,6 +43,7 @@ def test_personal_fields_are_blanked_and_statistics_kept(session):
     got = repo.get_lead(lead.id)
     assert (got.name, got.email, got.phone, got.message) == ("[anonymized]", "", None, "")
     assert got.anonymized_at == NOW
+    assert got.ai_reason is None
     assert (got.category, got.risk, got.urgency, got.language) == ("appointment", "low", "normal", "de")
     assert got.status == "replied"
     assert got.created_at == CUTOFF - timedelta(days=1)
@@ -52,6 +54,11 @@ def test_reply_texts_and_dedup_key_are_blanked_too(session):
     lead = make_lead(repo, CUTOFF - timedelta(days=1))
     assert lead.dedup_key is not None
     r1, r2 = add_reply(repo, lead.id, 1), add_reply(repo, lead.id, 2)
+    # a failed send may leave the recipient address in `error`
+    repo.set_reply_status(r1.id, ReplyStatus.FAILED, now=NOW, error="550 rejected: anna@example.com")
+    repo.set_reply_status(r1.id, ReplyStatus.SENT, now=NOW)
+    repo.set_reply_status(r2.id, ReplyStatus.FAILED, now=NOW, error="550 rejected: anna@example.com")
+    repo.set_reply_status(r2.id, ReplyStatus.SENT, now=NOW, error="boom anna@example.com")
     lonely = make_lead(repo, CUTOFF - timedelta(days=2), email="b@example.com")  # no replies
 
     assert repo.anonymize_older_than(cutoff=CUTOFF, now=NOW) == 2
@@ -61,7 +68,7 @@ def test_reply_texts_and_dedup_key_are_blanked_too(session):
     assert repo.get_lead(lonely.id).dedup_key is None
     for rid in (r1.id, r2.id):
         rep = session.get(Reply, rid)
-        assert rep.body == "[anonymized]" and rep.ai_body is None
+        assert rep.body == "[anonymized]" and rep.ai_body is None and rep.error is None
         assert rep.status == "sent" and rep.edited is True and rep.kind == "draft"
         assert rep.sent_at == NOW and rep.created_at == NOW
 

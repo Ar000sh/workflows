@@ -65,7 +65,7 @@ def _repo_with(tmp_path: Path, filename: str, content: str) -> subprocess.Comple
 
 
 sys.path.insert(0, str(HOOKS))
-from precommit import summarize  # noqa: E402
+from precommit import report, summarize  # noqa: E402
 
 
 @pytest.mark.parametrize("output, expected", [
@@ -80,6 +80,19 @@ from precommit import summarize  # noqa: E402
 ])
 def test_precommit_summary_line_is_extracted(output, expected):
     assert summarize(output) == expected
+
+
+# The gate's printed lines: a pass line, plus an exact warning when tests were skipped.
+def test_precommit_report_warns_about_skipped_tests():
+    assert report("1 passed, 2 skipped in 1s") == [
+        "pre-commit: tests passed (1 passed, 2 skipped in 1s)",
+        "pre-commit: 2 tests were SKIPPED (database not running?)",
+    ]
+
+
+def test_precommit_report_has_no_warning_without_skips():
+    assert report("3 passed in 1s") == ["pre-commit: tests passed (3 passed in 1s)"]
+    assert report("boom") == ["pre-commit: tests passed"]
 
 
 # No summary line (pytest crashed, or output is empty): empty text and 0, so the caller prints a plain message.

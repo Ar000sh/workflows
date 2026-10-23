@@ -23,6 +23,9 @@ DUPLICATE_WINDOW = timedelta(minutes=2)
 # gets a clear ValueError; the CHECKs stay as the last line of defence.
 MAX_NAME, MAX_EMAIL, MAX_PHONE, MAX_MESSAGE = 200, 254, 50, 10_000
 
+# Width of leads.language, read from the model so the two cannot drift apart.
+LANGUAGE_MAX = Lead.__table__.c.language.type.length
+
 
 # Postgres text columns cannot hold NUL (\x00); drop it instead of crashing the insert.
 def _clean(value: str) -> str:
@@ -111,8 +114,10 @@ class Repository:
                 lead.category = classification.category.value
                 lead.risk = classification.risk.value
                 lead.urgency = classification.urgency.value
-                lead.language = classification.language
-                lead.ai_reason = classification.reason
+                # The model's text is untrusted: cut the language to the column width and drop NUL
+                # from the reason, otherwise the whole update fails and the decision flags are lost.
+                lead.language = classification.language[:LANGUAGE_MAX]
+                lead.ai_reason = _clean(classification.reason)
             lead.language_unsupported = decision.language_unsupported
             lead.needs_manual_review = decision.needs_manual_review
             self.session.commit()
@@ -196,8 +201,9 @@ class Repository:
         ))
 
     # DSGVO retention: blank the personal data of every lead created BEFORE `cutoff` (strictly:
-    # a lead exactly at the cutoff stays) that is not anonymized yet. Reply texts and the
-    # dedup_key hash count as personal data too. Category, risk, urgency, language, statuses and
+    # a lead exactly at the cutoff stays) that is not anonymized yet. Reply texts, reply errors
+    # (they may hold a recipient address), the dedup_key hash and ai_reason (free text about the
+    # patient) count as personal data too. Category, risk, urgency, language, statuses and
     # timestamps stay, so the statistics survive. Audit rows are not touched (they only point
     # at ids). Leads and replies change in ONE transaction; the `anonymized_at IS NULL` filter
     # makes a second run a no-op. Returns how many leads were changed.
@@ -213,12 +219,12 @@ class Repository:
             ))
             if ids:
                 self.session.execute(
-                    update(Reply).where(Reply.lead_id.in_(ids)).values(body="[anonymized]", ai_body=None)
+                    update(Reply).where(Reply.lead_id.in_(ids)).values(body="[anonymized]", ai_body=None, error=None)
                 )
                 self.session.execute(
                     update(Lead).where(Lead.id.in_(ids)).values(
                         name="[anonymized]", email="", phone=None, message="",
-                        dedup_key=None, anonymized_at=now,
+                        dedup_key=None, ai_reason=None, anonymized_at=now,
                     )
                 )
             self.session.commit()

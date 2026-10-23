@@ -46,6 +46,16 @@ def summarize(output: str) -> tuple[str, int]:
     return "", 0
 
 
+# The lines the gate prints after a green run (main prints them). Kept separate so a test can check
+# the exact skip warning: a green gate must never silently hide that the DB tests did not run.
+def report(output: str) -> list[str]:
+    summary, skipped = summarize(output)
+    lines = [f"pre-commit: tests passed ({summary})" if summary else "pre-commit: tests passed"]
+    if skipped:
+        lines.append(f"pre-commit: {skipped} tests were SKIPPED (database not running?)")
+    return lines
+
+
 def kill_tree(process: subprocess.Popen) -> None:
     if os.name == "nt":
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True)
@@ -85,10 +95,8 @@ def main() -> None:
     if process.returncode != 0:
         print("\n".join(output.splitlines()[-30:]), file=sys.stderr)
         fail("tests failed. Fix them before committing.")
-    summary, skipped = summarize(output)
-    print(f"pre-commit: tests passed ({summary})" if summary else "pre-commit: tests passed")
-    if skipped:
-        print(f"pre-commit: {skipped} tests were SKIPPED (database not running?)")
+    for line in report(output):
+        print(line)
 
 
 if __name__ == "__main__":
