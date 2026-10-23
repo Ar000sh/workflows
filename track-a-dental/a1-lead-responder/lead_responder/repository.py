@@ -223,7 +223,8 @@ class Repository:
     # Work is done in batches of `batch_size` leads, each batch ONE short transaction (select the
     # next ids FOR UPDATE, blank their replies and the leads, commit), until none are left. This
     # avoids a giant IN list and long locks. A crash mid-run is safe: finished batches stay
-    # done, the `anonymized_at IS NULL` filter makes a re-run continue and a second run a no-op.
+    # done, the `anonymized_at IS NULL` filter makes a re-run continue; a second run returns 0 (it only
+    # re-runs the sweep below, which blanks leftovers).
     # Finally a SWEEP blanks leftovers on leads that are ALREADY anonymized (a reply or
     # ai_reason that slipped in later, e.g. a send error written after anonymization); the
     # sweep does not change the return value. Returns how many leads were newly anonymized.
