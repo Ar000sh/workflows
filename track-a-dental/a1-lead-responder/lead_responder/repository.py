@@ -1,4 +1,4 @@
-"""Repository: the only code that reads and writes leads (replies etc. are added in later tasks).
+"""Repository: the only code that reads and writes leads and replies (staff and audit come later).
 
 Why a repository: the rest of the app asks for "create this lead" or "set this status" and
 never builds queries itself. Validation, duplicate detection and transaction handling live in
@@ -13,9 +13,9 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from lead_responder.db.models import Lead, LeadStatus
+from lead_responder.db.models import Lead, LeadStatus, Reply, ReplyStatus
 from lead_responder.models import Classification
-from lead_responder.router import Decision
+from lead_responder.router import Action, Decision
 
 DUPLICATE_WINDOW = timedelta(minutes=2)
 
@@ -133,6 +133,67 @@ class Repository:
         except BaseException:
             self.session.rollback()
             raise
+
+    # Stores one reply (what the AI wrote in ai_body, what will actually be sent in body).
+    # kind and status must be enum members; a missing lead fails on the foreign key
+    # (IntegrityError) and the session is rolled back so the caller can carry on.
+    def add_reply(
+        self, lead_id: int, *, kind: Action, ai_body: str | None, body: str,
+        status: ReplyStatus, now: datetime, edited: bool | None = None,
+    ) -> Reply:
+        if not isinstance(kind, Action):
+            raise ValueError(f"kind must be an Action, got {kind!r}")
+        if not isinstance(status, ReplyStatus):
+            raise ValueError(f"status must be a ReplyStatus, got {status!r}")
+        _require_aware("now", now)
+        try:
+            reply = Reply(
+                lead_id=lead_id, kind=kind.value,
+                ai_body=_clean(ai_body) if ai_body is not None else None,
+                body=_clean(body), status=status.value, created_at=now, edited=edited,
+                # A reply created already "sent" needs its timestamp too.
+                sent_at=now if status is ReplyStatus.SENT else None,
+            )
+            self.session.add(reply)
+            self.session.commit()
+            return reply
+        except BaseException:
+            self.session.rollback()
+            raise
+
+    # Moves a reply to a new status. sent_at is set only when the new status is "sent".
+    # `error` is assigned every time (None clears it: a successful resend must not keep an old
+    # error); approved_by and edited are only changed when given, so later steps do not wipe them.
+    def set_reply_status(
+        self, reply_id: int, status: ReplyStatus, *, now: datetime, error: str | None = None,
+        approved_by: int | None = None, edited: bool | None = None,
+    ) -> Reply:
+        if not isinstance(status, ReplyStatus):
+            raise ValueError(f"status must be a ReplyStatus, got {status!r}")
+        _require_aware("now", now)
+        try:
+            reply = self.session.get(Reply, reply_id)
+            if reply is None:
+                raise LookupError(f"reply {reply_id} not found")
+            reply.status = status.value
+            reply.error = _clean(error) if error is not None else None
+            if status is ReplyStatus.SENT:
+                reply.sent_at = now
+            if approved_by is not None:
+                reply.approved_by = approved_by
+            if edited is not None:
+                reply.edited = edited
+            self.session.commit()
+            return reply
+        except BaseException:
+            self.session.rollback()
+            raise
+
+    # All replies of one lead, oldest first (id breaks ties between equal timestamps).
+    def replies_for(self, lead_id: int) -> list[Reply]:
+        return list(self.session.scalars(
+            select(Reply).where(Reply.lead_id == lead_id).order_by(Reply.created_at, Reply.id)
+        ))
 
     def _require(self, lead_id: int) -> Lead:
         lead = self.session.get(Lead, lead_id)
