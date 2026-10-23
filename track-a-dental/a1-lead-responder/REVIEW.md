@@ -70,6 +70,18 @@ Idea: the assistant gets smarter with use, with a human approving every change.
 - ROI angle: lowers upkeep effort, supports a monthly retainer.
 - [ ] Decide: should the practice owner or any staff member approve entries? Add to the A1 spec once decided.
 
+### 4a: your review, in this order (about 1.5 to 2 hours; all paths under `track-a-dental/a1-lead-responder/`)
+Branch `feat/a1-layer-4a`, 13 commits on top of `df0c49e`. Tick each box when you have read it and are happy, or write a note.
+- [ ] **1. Run it (10 min).** Follow the README Run table: `docker compose up -d postgres mailpit`, `alembic -c track-a-dental/a1-lead-responder/alembic.ini upgrade head`, `uv run pytest tests/db`, then `uv run python -m lead_responder.scripts.run_retention` against the dev database (nobody has run that script against your dev DB yet). Open Mailpit at http://localhost:8025 (empty is fine; nothing sends yet).
+- [ ] **2. Schema (20 min).** `lead_responder/db/models.py` (136 lines), then `alembic/versions/a30306790587_init.py`. Check against spec section 5: columns, the two additions (`replies.edited`, `leads.dedup_key`), the CHECK constraints, the indexes. Note the length limits are CHECKs, not VARCHAR (see notes below).
+- [ ] **3. Leads repository (30 min).** `lead_responder/repository.py` (296 lines): `create_lead_if_new` first (advisory lock, then lookup, then insert, one transaction), then `set_classification`, `set_lead_status`. Ask yourself: what happens if two submissions arrive at once, and what does the dedup key contain?
+- [ ] **4. Replies repository (10 min).** Same file: `add_reply`, `set_reply_status`, `replies_for`. This is where the "error cleared on every change" and "sent is final" decisions below come from.
+- [ ] **5. Retention (20 min).** `retention.py` (15 lines) and `anonymize_older_than` in `repository.py`: batches, the 90-day boundary, the sweep of leftovers, what is blanked and what is kept as statistics. This is the DSGVO promise you would make to a client, so read it slowly.
+- [ ] **6. The tests that matter (20 min).** `tests/db/test_repository_leads.py` (the advisory-lock test and the dedup-collision test), `tests/db/test_retention.py` (boundary, batches, sweep), `tests/db/test_schema.py` (the drift guards). Pick one behaviour and ask "would this test fail if I deleted that line?" (the reviews mutation-checked the important ones).
+- [ ] **7. The commit gate (10 min).** `.claude/hooks/precommit.py` (`summarize`, `report`) and the `GIT_*` env scrub in `.claude/hooks/test_hooks.py` (an out-of-plan fix, see `devsetup/CATALOG.md`).
+- [ ] **8. Decide the open items in "4a notes" below** (error clearing, "sent is final", audit row in the same transaction) or leave them for the 4b/4c plans; then skim the Parked lists and the attack-probe section at the bottom.
+- [ ] **9. Then choose:** merge `feat/a1-layer-4a` into `main` (or open a PR), and start the 4b plan.
+
 ### 4a notes: to decide or know (2026-10-23)
 - [ ] **Error is cleared on every status change.** `set_reply_status` sets `error` to the given value or None each time, so a `failed` then `approved` retry loses the "may have been sent" warning. Decide in 4b/4c: clear only on `sent`, or only when `error` is passed.
 - [x] **Retention blanks `leads.ai_reason` and `replies.error`** (done in the final-review fixes; `error` may hold a recipient address, `ai_reason` is free text about the patient).
