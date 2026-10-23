@@ -8,7 +8,9 @@ from psycopg.errors import CheckViolation
 from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 
-from lead_responder.db.models import AuditLog, Base, Lead, Reply, StaffUser
+from lead_responder.db.models import (
+    AUDIT_ACTIONS, REPLY_KINDS, AuditLog, Base, Lead, LeadStatus, Reply, ReplyStatus, StaffUser,
+)
 
 
 def make_lead(**overrides) -> Lead:
@@ -69,3 +71,23 @@ def test_staff_user_roundtrip(session):
     session.add(StaffUser(name="Dr. Test", email="dr@example.com", password_hash="x"))
     session.commit()
     assert session.query(StaffUser).count() == 1
+
+
+# compare_metadata does NOT diff CHECK constraints, so test_models_and_migration_agree cannot see a new
+# status/kind/action that was added to the models but not to a migration. This positive test can: it
+# inserts one row per allowed value, so a missing migration makes the DB reject the value right here.
+def test_every_allowed_value_is_accepted_by_the_database(session):
+    for status in LeadStatus:
+        session.add(make_lead(status=status.value))
+    session.commit()
+
+    lead = make_lead()
+    session.add(lead)
+    session.commit()
+    for status in ReplyStatus:
+        session.add(Reply(lead_id=lead.id, kind="draft", ai_body="x", body="x", status=status.value))
+    for kind in REPLY_KINDS:
+        session.add(Reply(lead_id=lead.id, kind=kind, ai_body="x", body="x", status="drafted"))
+    for action in AUDIT_ACTIONS:
+        session.add(AuditLog(action=action, lead_id=lead.id))
+    session.commit()
