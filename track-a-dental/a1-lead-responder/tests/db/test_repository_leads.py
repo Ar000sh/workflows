@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from lead_responder.db.models import Lead, LeadStatus
+from lead_responder.db.models import Lead, LeadStatus, ReplyStatus
 from lead_responder.models import Category, Classification, Risk, Urgency
 from lead_responder.repository import Repository, _dedup_key, _lock_id
 from lead_responder.router import Action, Decision
@@ -267,3 +267,51 @@ def test_unknown_lead_id_raises_lookup_error(session):
         repo.set_lead_status(999, LeadStatus.DONE)
     with pytest.raises(LookupError):
         repo.set_classification(999, classification=None, decision=decision)
+
+
+# F3: the old key joined email and message with a newline, so a newline inside the email could
+# fake the boundary and make two different patients look identical (the second was dropped).
+def test_newline_in_email_cannot_collide_with_message_dedup_key(session):
+    repo = Repository(session)
+    first, c1 = repo.create_lead_if_new(**payload(email="x@y.de\nattacker", message="Q"))
+    second, c2 = repo.create_lead_if_new(**payload(email="x@y.de", message="attacker\nQ"))
+    assert c1 is True and c2 is True
+    assert first.id != second.id
+    assert count_leads(session) == 2
+
+
+# F6a: NUL inside the model's language is dropped before truncating; flags are still stored.
+@pytest.mark.parametrize("lang, expected", [("d" + chr(0) + "e", "de"), ("und" + chr(0) + "etermined", "undetermin")])
+def test_set_classification_strips_nul_from_language_and_keeps_flags(session, lang, expected):
+    repo = Repository(session)
+    lead, _ = repo.create_lead_if_new(**payload())
+    cls = Classification(
+        category=Category.APPOINTMENT, risk=Risk.ROUTINE, urgency=Urgency.NORMAL,
+        language=lang, reason="x",
+    )
+    repo.set_classification(lead.id, classification=cls, decision=_decision())
+    session.expire_all()
+    got = repo.get_lead(lead.id)
+    assert got.language == expected
+    assert got.needs_manual_review is True and got.language_unsupported is True
+
+
+# F2 (b): an anonymized lead takes no new personal data through classification or replies.
+def test_anonymized_lead_refuses_classification_and_new_replies(session):
+    repo = Repository(session)
+    lead, _ = repo.create_lead_if_new(**payload())
+    assert repo.anonymize_older_than(cutoff=NOW + timedelta(days=1), now=NOW + timedelta(days=1)) == 1
+    cls = Classification(
+        category=Category.APPOINTMENT, risk=Risk.ROUTINE, urgency=Urgency.NORMAL,
+        language="de", reason="Dear Anna",
+    )
+    with pytest.raises(ValueError, match="anonymized"):
+        repo.set_classification(lead.id, classification=cls, decision=_decision())
+    with pytest.raises(ValueError, match="anonymized"):
+        repo.add_reply(
+            lead.id, kind=Action.DRAFT, ai_body=None, body="Dear Anna",
+            status=ReplyStatus.DRAFTED, now=NOW,
+        )
+    # the session is still usable and nothing was written
+    assert repo.replies_for(lead.id) == []
+    assert repo.get_lead(lead.id).ai_reason is None

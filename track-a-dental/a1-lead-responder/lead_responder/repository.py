@@ -2,7 +2,7 @@
 
 Why a repository: the rest of the app asks for "create this lead" or "set this status" and
 never builds queries itself. Validation, duplicate detection and transaction handling live in
-one tested place. Each public method is ONE transaction: it commits on success and rolls the
+one tested place. Each public method is ONE transaction (except `anonymize_older_than`, which commits once per batch): it commits on success and rolls the
 session back on any failure, so the caller's Session stays usable.
 """
 from __future__ import annotations
@@ -26,6 +26,10 @@ MAX_NAME, MAX_EMAIL, MAX_PHONE, MAX_MESSAGE = 200, 254, 50, 10_000
 # Width of leads.language, read from the model so the two cannot drift apart.
 LANGUAGE_MAX = Lead.__table__.c.language.type.length
 
+# Retention handles this many leads per transaction: short locks, and no giant IN (...) list
+# (Postgres allows at most 65535 bind parameters in one statement).
+RETENTION_BATCH_SIZE = 5000
+
 
 # Postgres text columns cannot hold NUL (\x00); drop it instead of crashing the insert.
 def _clean(value: str) -> str:
@@ -44,9 +48,13 @@ def _require_aware(field: str, value: datetime) -> None:
         raise ValueError(f"{field} must be timezone-aware")
 
 
-# Fingerprint of "same person, same message": lower-cased email + newline + stripped message.
+# Fingerprint of "same person, same message": lower-cased email + NUL + stripped message.
+# The separator must be a character that cannot occur in either input. _clean() removes NUL
+# from all text, so callers MUST pass cleaned values (create_lead_if_new does, before this call).
+# With a newline as separator, ("x@y.de<newline>A", "Q") and ("x@y.de", "A<newline>Q") collided
+# and the second, different patient was dropped as a duplicate.
 def _dedup_key(email: str, message: str) -> str:
-    return hashlib.sha256(f"{email.lower()}\n{message.strip()}".encode()).hexdigest()
+    return hashlib.sha256(f"{email.lower()}{chr(0)}{message.strip()}".encode()).hexdigest()
 
 
 # Postgres advisory locks take a signed 64-bit integer: use the first 8 bytes of the hash.
@@ -105,18 +113,21 @@ class Repository:
 
     # Stores the classifier's result and the router's flags. The classification can be None
     # (the AI failed); the flags from the decision are then still saved so staff see the lead.
+    # Refuses an anonymized lead: new text about the patient would never be cleaned again.
     def set_classification(
         self, lead_id: int, *, classification: Classification | None, decision: Decision,
     ) -> Lead:
         try:
             lead = self._require(lead_id)
+            self._refuse_if_anonymized(lead_id)
             if classification is not None:
                 lead.category = classification.category.value
                 lead.risk = classification.risk.value
                 lead.urgency = classification.urgency.value
                 # The model's text is untrusted: cut the language to the column width and drop NUL
                 # from the reason, otherwise the whole update fails and the decision flags are lost.
-                lead.language = classification.language[:LANGUAGE_MAX]
+                # Clean first, then cut: NUL inside the language would otherwise survive the cut.
+                lead.language = _clean(classification.language)[:LANGUAGE_MAX]
                 lead.ai_reason = _clean(classification.reason)
             lead.language_unsupported = decision.language_unsupported
             lead.needs_manual_review = decision.needs_manual_review
@@ -142,6 +153,8 @@ class Repository:
     # Stores one reply (what the AI wrote in ai_body, what will actually be sent in body).
     # kind and status must be enum members; a missing lead fails on the foreign key
     # (IntegrityError) and the session is rolled back so the caller can carry on.
+    # Refuses an anonymized lead (ValueError): the reply text would be personal data that
+    # retention no longer looks for.
     def add_reply(
         self, lead_id: int, *, kind: Action, ai_body: str | None, body: str,
         status: ReplyStatus, now: datetime, edited: bool | None = None,
@@ -152,6 +165,7 @@ class Repository:
             raise ValueError(f"status must be a ReplyStatus, got {status!r}")
         _require_aware("now", now)
         try:
+            self._refuse_if_anonymized(lead_id)
             reply = Reply(
                 lead_id=lead_id, kind=kind.value,
                 ai_body=_clean(ai_body) if ai_body is not None else None,
@@ -205,19 +219,34 @@ class Repository:
     # (they may hold a recipient address), the dedup_key hash and ai_reason (free text about the
     # patient) count as personal data too. Category, risk, urgency, language, statuses and
     # timestamps stay, so the statistics survive. Audit rows are not touched (they only point
-    # at ids). Leads and replies change in ONE transaction; the `anonymized_at IS NULL` filter
-    # makes a second run a no-op. Returns how many leads were changed.
-    def anonymize_older_than(self, *, cutoff: datetime, now: datetime) -> int:
+    # at ids).
+    # Work is done in batches of `batch_size` leads, each batch ONE short transaction (select the
+    # next ids FOR UPDATE, blank their replies and the leads, commit), until none are left. This
+    # avoids a giant IN list and long locks. A crash mid-run is safe: finished batches stay
+    # done, the `anonymized_at IS NULL` filter makes a re-run continue and a second run a no-op.
+    # Finally a SWEEP blanks leftovers on leads that are ALREADY anonymized (a reply or
+    # ai_reason that slipped in later, e.g. a send error written after anonymization); the
+    # sweep does not change the return value. Returns how many leads were newly anonymized.
+    def anonymize_older_than(
+        self, *, cutoff: datetime, now: datetime, batch_size: int = RETENTION_BATCH_SIZE,
+    ) -> int:
         _require_aware("cutoff", cutoff)
         _require_aware("now", now)
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+        total = 0
         try:
-            # FOR UPDATE: a concurrent run waits here, then finds nothing left to do.
-            ids = list(self.session.scalars(
-                select(Lead.id)
-                .where(Lead.created_at < cutoff, Lead.anonymized_at.is_(None))
-                .with_for_update()
-            ))
-            if ids:
+            while True:
+                # FOR UPDATE: a concurrent run waits here, then finds nothing left to do.
+                ids = list(self.session.scalars(
+                    select(Lead.id)
+                    .where(Lead.created_at < cutoff, Lead.anonymized_at.is_(None))
+                    .order_by(Lead.id)
+                    .limit(batch_size)
+                    .with_for_update()
+                ))
+                if not ids:
+                    break
                 self.session.execute(
                     update(Reply).where(Reply.lead_id.in_(ids)).values(body="[anonymized]", ai_body=None, error=None)
                 )
@@ -227,13 +256,37 @@ class Repository:
                         dedup_key=None, ai_reason=None, anonymized_at=now,
                     )
                 )
+                self.session.commit()
+                total += len(ids)
+            # Sweep: set-based UPDATEs with a subquery (no id list), one transaction.
+            done = select(Lead.id).where(Lead.anonymized_at.is_not(None))
+            self.session.execute(
+                update(Reply)
+                .where(
+                    Reply.lead_id.in_(done),
+                    (Reply.body != "[anonymized]") | Reply.ai_body.is_not(None) | Reply.error.is_not(None),
+                )
+                .values(body="[anonymized]", ai_body=None, error=None)
+            )
+            self.session.execute(
+                update(Lead)
+                .where(Lead.anonymized_at.is_not(None), Lead.ai_reason.is_not(None))
+                .values(ai_reason=None)
+            )
             self.session.commit()
             # Loaded Lead/Reply objects in this session are now stale; drop them so callers re-read.
             self.session.expire_all()
-            return len(ids)
+            return total
         except BaseException:
             self.session.rollback()
             raise
+
+    # Raises ValueError for an anonymized lead. Reads the column straight from the database
+    # (not the identity map) inside the caller's transaction, so a cached object cannot hide it.
+    def _refuse_if_anonymized(self, lead_id: int) -> None:
+        anonymized_at = self.session.scalar(select(Lead.anonymized_at).where(Lead.id == lead_id))
+        if anonymized_at is not None:
+            raise ValueError(f"lead {lead_id} is anonymized")
 
     def _require(self, lead_id: int) -> Lead:
         lead = self.session.get(Lead, lead_id)

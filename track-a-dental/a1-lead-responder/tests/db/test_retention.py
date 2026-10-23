@@ -153,3 +153,80 @@ def test_run_uses_now_minus_days_as_cutoff(session):
 def test_run_rejects_non_positive_days(session):
     with pytest.raises(ValueError):
         retention.run(Repository(session), days=0, now=NOW)
+
+
+# F1: retention works in batches (one short transaction each) so a big backlog never builds one
+# huge IN list (Postgres allows 65535 bind parameters). Tiny batch size proves the loop.
+def test_retention_processes_all_leads_in_batches(session):
+    repo = Repository(session)
+    leads = [make_lead(repo, CUTOFF - timedelta(days=1), email=f"p{i}@example.com") for i in range(7)]
+    for lead in leads:
+        add_reply(repo, lead.id)
+    young = make_lead(repo, NOW - timedelta(days=1), email="young@example.com")
+    add_reply(repo, young.id)
+
+    assert repo.anonymize_older_than(cutoff=CUTOFF, now=NOW, batch_size=3) == 7
+
+    session.expire_all()
+    assert all(repo.get_lead(lead.id).anonymized_at == NOW for lead in leads)
+    bodies = {r.lead_id: r.body for r in session.scalars(select(Reply))}
+    assert all(bodies[lead.id] == "[anonymized]" for lead in leads)
+    assert bodies[young.id] == "Edited text 1"
+    assert repo.anonymize_older_than(cutoff=CUTOFF, now=NOW, batch_size=3) == 0
+
+
+# Batches commit separately: this counts the commits to show the work really is split.
+def test_retention_commits_once_per_batch(session):
+    from sqlalchemy import event
+
+    repo = Repository(session)
+    for i in range(7):
+        make_lead(repo, CUTOFF - timedelta(days=1), email=f"p{i}@example.com")
+    commits = []
+    event.listen(session, "after_commit", lambda s: commits.append(1))
+    repo.anonymize_older_than(cutoff=CUTOFF, now=NOW, batch_size=3)
+    assert len(commits) >= 3  # batches of 3, 3, 1 (plus the sweep)
+
+
+def test_batch_size_must_be_positive(session):
+    with pytest.raises(ValueError):
+        Repository(session).anonymize_older_than(cutoff=CUTOFF, now=NOW, batch_size=0)
+
+
+# F2 (a): personal data that re-enters an already anonymized lead (written around the guard)
+# is swept away on the next run, although the lead itself is not "newly anonymized".
+def test_sweep_blanks_leftovers_on_already_anonymized_leads(session):
+    repo = Repository(session)
+    lead = make_lead(repo, CUTOFF - timedelta(days=1))
+    assert repo.anonymize_older_than(cutoff=CUTOFF, now=NOW) == 1
+    # bypass the repository guard, as a bug or a raw SQL fix would
+    lead_row = session.get(Lead, lead.id)
+    lead_row.ai_reason = "Patient Anna hat Angst"
+    late = Reply(
+        lead_id=lead.id, kind="draft", ai_body="Dear Anna", body="Dear Anna",
+        status="failed", error="smtp rejected anna@example.com", created_at=NOW,
+    )
+    session.add(late)
+    session.commit()
+
+    assert repo.anonymize_older_than(cutoff=CUTOFF, now=NOW + timedelta(days=1)) == 0
+
+    session.expire_all()
+    got = session.get(Lead, lead.id)
+    assert got.ai_reason is None
+    assert got.anonymized_at == NOW  # not moved
+    rep = session.get(Reply, late.id)
+    assert (rep.body, rep.ai_body, rep.error) == ("[anonymized]", None, None)
+    assert rep.status == "failed"  # statistics kept
+
+
+# set_reply_status stays allowed on an anonymized lead's reply; its error is swept next run.
+def test_set_reply_status_error_on_anonymized_lead_is_swept(session):
+    repo = Repository(session)
+    lead = make_lead(repo, CUTOFF - timedelta(days=1))
+    reply = add_reply(repo, lead.id)
+    repo.anonymize_older_than(cutoff=CUTOFF, now=NOW)
+    repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="smtp rejected x@y.de")
+    repo.anonymize_older_than(cutoff=CUTOFF, now=NOW)
+    session.expire_all()
+    assert session.get(Reply, reply.id).error is None
