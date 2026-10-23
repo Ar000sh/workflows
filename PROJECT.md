@@ -5,7 +5,8 @@
 
 ## Current status (update at the end of every session)
 - **A1 lead responder:** layers 1-3 done, tested, reviewed by Tariq, attacked by a fresh agent (fixes committed). Live eval scores are in the A1 README. The drafter eval has not been re-run since the 2026-10-23 guardrail changes (optional, costs about $0.45).
-- **Next:** layer 4, split into 4a data, 4b intake API and sender, 4c auth and audit, 4d dashboard, 4e demo site and end-to-end. The 4a plan is `docs/superpowers/plans/2026-10-23-a1-layer-4a-data-foundation.md`, waiting for Tariq's go and his choice of execution method. Layer 4 failure modes: A1 spec section 14.
+- **A1 layer 4a (data foundation) built:** Postgres + Mailpit in Docker, SQLAlchemy models, Alembic migration, `Repository` for leads and replies (duplicate detection, status changes) and the DSGVO retention job. Tests pass (DB tests skip without Postgres); review is pending (see the A1 REVIEW.md).
+- **Next:** layer 4b (intake API and sender), then 4c auth and audit, 4d dashboard, 4e demo site and end-to-end. Layer 4 failure modes: A1 spec section 14. The 4a plan is `docs/superpowers/plans/2026-10-23-a1-layer-4a-data-foundation.md`.
 - **Running things:** `uv run pytest`. DB tests need Docker Desktop running and `docker compose -f track-a-dental/a1-lead-responder/docker-compose.yml up -d postgres mailpit` (they skip, not fail, without it).
 - **Setup:** the git hook is enabled per clone (`git config core.hooksPath .githooks`). Skills: `/edge-case-probe`, `/run-evals`, `/retro`. Everything we added is in `devsetup/CATALOG.md`.
 
@@ -118,3 +119,4 @@ These are **not decided yet**. Settle them before building, and record the answe
 | 2026-10-05 | Tooling: `uv`, git | Modern standard; one-line setup per track |
 | 2026-10-22 | **Parallel goal: grow a reusable dev setup** (skills, agents if worth it, hooks, plugins, context-engineering practice, model/effort/reasoning templates) in `devsetup/` + `.claude/`, added only when a real need shows up | Tariq wants templates ready for client work; need-driven avoids over-engineering |
 | 2026-10-22 | Dev setup batch 1 (A1 retrospective): secrets guard hook, tests-before-commit git hook (docs-only skips, 90 s limit then ask Tariq), skills `edge-case-probe` and `run-evals` (asks before spending), CLAUDE.md engineering rules, `devsetup/CATALOG.md`, `.gitattributes`. No custom agents (built-in `/code-review` suffices) | Each item fixes something that actually hurt in A1; see devsetup/CATALOG.md |
+| 2026-10-23 | **Database layer: SQLAlchemy 2.0 ORM + Alembic migrations** (not raw SQL), `psycopg` driver, Postgres 16 in Docker on host port 5433; DB tests skip when Postgres is down and the pre-commit gate prints the skip count | Industry-standard tooling is what freelance clients expect; models and migrations are checked against each other by a test. See the 4a plan |

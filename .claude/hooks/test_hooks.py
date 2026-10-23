@@ -64,6 +64,30 @@ def _repo_with(tmp_path: Path, filename: str, content: str) -> subprocess.Comple
                           env=env)
 
 
+sys.path.insert(0, str(HOOKS))
+from precommit import summarize  # noqa: E402
+
+
+@pytest.mark.parametrize("output, expected", [
+    ("278 passed in 9s", ("278 passed in 9s", 0)),
+    ("270 passed, 8 skipped in 9s", ("270 passed, 8 skipped in 9s", 8)),
+    # trailing blank lines and a warnings block before the summary must not confuse it
+    ("..s\nwarnings here\n\n1 passed, 1 skipped, 2 warnings in 0.50s\n\n\n", ("1 passed, 1 skipped, 2 warnings in 0.50s", 1)),
+    # decorated (non -q) form and a failure line
+    ("===== 3 failed, 5 passed, 2 skipped in 1.2s =====\n", ("3 failed, 5 passed, 2 skipped in 1.2s", 2)),
+    # an earlier test name containing "skipped in 3s" must not win over the real last line
+    ("test_x skipped in 3s\n4 passed in 1s\n", ("4 passed in 1s", 0)),
+])
+def test_precommit_summary_line_is_extracted(output, expected):
+    assert summarize(output) == expected
+
+
+# No summary line (pytest crashed, or output is empty): empty text and 0, so the caller prints a plain message.
+def test_precommit_summary_without_summary_line():
+    assert summarize("Traceback...\nboom\n") == ("", 0)
+    assert summarize("") == ("", 0)
+
+
 def test_precommit_blocks_staged_env_file(tmp_path):
     result = _repo_with(tmp_path, ".env", "A=1\n")
     assert result.returncode == 1 and "secrets file staged" in result.stderr

@@ -27,6 +27,25 @@ def fail(message: str) -> None:
     sys.exit(1)
 
 
+# pytest's last line looks like "270 passed, 8 skipped in 9.1s" (with -q) or the same wrapped in "=====".
+SUMMARY_LINE = re.compile(r"^=*\s*(\d+ [a-z]+(?:, \d+ [a-z]+)* in [\d.]+s(?: \([\d:]+\))?)\s*=*$")
+SKIPPED = re.compile(r"(\d+) skipped")
+
+
+# Finds pytest's final summary line and how many tests were skipped. We search from the END
+# (trailing blank lines or warnings do not matter) and require "N word... in Xs", so a test name
+# that merely contains "skipped" cannot match. Returns ("", 0) if there is no such line.
+# Why it matters: DB tests skip (not fail) when Postgres is down, and a green gate must not hide that.
+def summarize(output: str) -> tuple[str, int]:
+    for line in reversed(output.splitlines()):
+        match = SUMMARY_LINE.match(line.strip())
+        if match:
+            summary = match.group(1)
+            skipped = SKIPPED.search(summary)
+            return summary, int(skipped.group(1)) if skipped else 0
+    return "", 0
+
+
 def kill_tree(process: subprocess.Popen) -> None:
     if os.name == "nt":
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True)
@@ -66,7 +85,10 @@ def main() -> None:
     if process.returncode != 0:
         print("\n".join(output.splitlines()[-30:]), file=sys.stderr)
         fail("tests failed. Fix them before committing.")
-    print("pre-commit: tests passed")
+    summary, skipped = summarize(output)
+    print(f"pre-commit: tests passed ({summary})" if summary else "pre-commit: tests passed")
+    if skipped:
+        print(f"pre-commit: {skipped} tests were SKIPPED (database not running?)")
 
 
 if __name__ == "__main__":

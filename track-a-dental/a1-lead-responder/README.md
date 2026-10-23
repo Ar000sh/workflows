@@ -4,7 +4,7 @@ Website inquiries for a (fictional) dental practice in Hannover: routine questio
 instant AI reply; sensitive ones get an instant acknowledgment plus an AI draft for staff.
 Spec: `docs/superpowers/specs/2026-10-05-a1-lead-responder-design.md`
 
-**Status:** layers 1–3 (core logic, no web/database yet).
+**Status:** layers 1–3 (core logic) and layer 4a (database, repository, retention). No web API, sending or dashboard yet (4b onwards).
 
 ## Setup
 Requires [uv](https://docs.astral.sh/uv/) to be installed.
@@ -24,6 +24,22 @@ Run all commands from the repo root.
 | One inquiry end-to-end | `uv run python -m lead_responder.scripts.try_inquiry --name Anna --message "Haben Sie samstags geöffnet?"` |
 | Classifier eval | `uv run python -m lead_responder.scripts.eval_classifier` |
 | Drafter eval | `uv run python -m lead_responder.scripts.eval_drafter` |
+| Start Postgres + Mailpit (Docker Desktop must be running) | `docker compose -f track-a-dental/a1-lead-responder/docker-compose.yml up -d postgres mailpit` |
+| Create / update the database tables | `uv run alembic -c track-a-dental/a1-lead-responder/alembic.ini upgrade head` (or `uv run alembic upgrade head` from inside `track-a-dental/a1-lead-responder/`) |
+| Database tests only | `uv run pytest track-a-dental/a1-lead-responder/tests/db` (skipped, not failed, if Postgres is not running) |
+| DSGVO retention job | `uv run python -m lead_responder.scripts.run_retention` |
+
+## Data layer (layer 4a)
+- **Tables** (`lead_responder/db/models.py`, SQLAlchemy ORM; changes only through Alembic migrations in `alembic/`): `leads`, `replies`, `staff_users`, `audit_log`. Status and kind values are enforced by CHECK constraints in the database too. `staff_users` and `audit_log` exist but get their code in 4c.
+- **Repository** (`lead_responder/repository.py`, one transaction per method): `create_lead_if_new` (the same email + message within 2 minutes returns the existing lead instead of a second one; a Postgres advisory lock makes this safe for simultaneous submissions), `get_lead`, `set_classification`, `set_lead_status`, `add_reply`, `set_reply_status`, `replies_for`, `anonymize_older_than`. Only timezone-aware datetimes are accepted; NUL bytes are dropped; over-long text raises `ValueError`.
+- **Retention** (`lead_responder/retention.py`, `RETENTION_DAYS`, default 90): leads older than the limit lose name, email, phone, message and the duplicate hash, and their reply texts are blanked; category, risk, urgency, language, statuses and timestamps stay, so statistics survive. Running it twice changes nothing the second time.
+- **Why it sells:** the duplicate rule stops double replies (and double API cost) when a patient double-clicks submit, and automatic deletion after a fixed period is the storage-limitation answer a German practice needs under DSGVO. Concrete ROI math comes with the full A1 in the later layers.
+- Dev database `leads` and test database `leads_test` on host port 5433 (user and password `leads`; override with `DATABASE_URL`, `DATABASE_URL_TEST`).
+
+Checked on 2026-10-23: `alembic upgrade head` on the dev database ends at revision `a30306790587 (head)`; `run_retention` prints `Anonymized 0 lead(s) older than 90 days.` on the empty dev database; `tests/db` gives 50 passed; the full suite gives 334 passed with Postgres up and 284 passed, 50 skipped with Postgres stopped.
+
+## Pre-commit gate timing
+`git commit` runs the whole suite (limit 90 s, see `.claude/hooks/precommit.py`). Observed: about 57 s once (a cold run), about 16 s later in the same session; a plain `uv run pytest -q` took about 11 s on 2026-10-23. So there is headroom, but if it ever nears 90 s, ask Tariq before changing the rule. The gate prints pytest's summary line and warns when tests were skipped.
 
 ## How an inquiry flows
 1. **Redact** emails and phone numbers → only the message text goes to Claude.

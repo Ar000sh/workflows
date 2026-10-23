@@ -1,14 +1,14 @@
 # Review & Next Steps (Tariq's checklist)
 
 > A1 review file; each project keeps its own REVIEW.md next to its README. Central place for work that needs **Tariq's review or decision**. Tick items off, add notes. Update it whenever a step finishes or new review work appears.
-> Last updated: 2026-10-22
+> Last updated: 2026-10-23
 
 ## Where we are
 - A1 layers 1–3 (core logic) built; 120 mocked unit tests pass; Python pinned to 3.12 (`.python-version`).
 - First live runs on 2026-10-22 (Haiku 4.5 classifier, Sonnet 5.5 drafter, effort low):
   - Classifier: category 44/45, risk 45/45, language 45/45, sensitive→routine **0**, injection failures **0**, cost $0.057.
   - Drafter: 18 auto-replies, 0 guardrail rejections, 0 API errors, cost $0.445 (about $0.01 per inquiry).
-- Nothing after layer 3 exists yet (no API server, database, dashboard, n8n).
+- Layer 4a exists (database, repository, retention). No API server, sender, dashboard or n8n yet.
 
 ## Concepts to understand (ask me about anything unclear)
 - **Pipeline:** redact (code) → classify (Haiku) → decide (code) → draft (Sonnet) → guardrails (code) → send or staff queue.
@@ -54,7 +54,8 @@ Hypothesis: better context lets a cheaper model write as well as Sonnet.
 - [ ] Start `devsetup/CATALOG.md` (what, why, when it helped).
 
 ### 7. Layer 4 — after the drafter model is decided
-- [ ] FastAPI, Postgres, staff login and audit log, HTMX dashboard, Mailpit, Docker Compose, demo site. See spec section 9.
+- [x] 4a data foundation: Postgres + Mailpit in Docker, ORM models, Alembic, repository, retention (built 2026-10-23; your review is still open, see "4a notes" below).
+- [ ] 4b intake API and sender, 4c staff login and audit log, 4d HTMX dashboard, 4e demo site and end-to-end. See spec section 9.
 - [ ] Form/API validation (found by the edge-case probe): cap the message size at the API (the pipeline also rejects > 5000 chars for the AI), cap and sanitise the name (max length, no newlines; it is inserted into reply bodies), escape everything on display (Jinja autoescape stays ON).
 - [ ] Dashboard shows two queues: sensitive drafts first, routine drafts below (decided 2026-10-22). Every lead has a draft to review, so staff never write from scratch.
 - [ ] Then layers 5–6 (n8n, staff notifications), ROI math in the README, demo video.
@@ -68,6 +69,18 @@ Idea: the assistant gets smarter with use, with a human approving every change.
 - Fits as layer 4b or layer 7 (needs dashboard, DB, audit log). The same approval flow later feeds a vector index in A2 (RAG).
 - ROI angle: lowers upkeep effort, supports a monthly retainer.
 - [ ] Decide: should the practice owner or any staff member approve entries? Add to the A1 spec once decided.
+
+### 4a notes: to decide or know (2026-10-23)
+- [ ] **Error is cleared on every status change.** `set_reply_status` sets `error` to the given value or None each time, so a `failed` then `approved` retry loses the "may have been sent" warning. Decide in 4b/4c: clear only on `sent`, or only when `error` is passed.
+- [ ] **Retention does not blank `replies.error`.** After a failed send it may hold the recipient address. Decide when 4b writes it (store no address there, or blank it in retention).
+- [ ] **Length limits are CHECK constraints** on text columns (`char_length`), not `VARCHAR(n)`. Overflow raises `IntegrityError`; the repository checks first and raises a clear `ValueError`.
+- [ ] **Sessions:** `make_session_factory` uses `expire_on_commit=False`. A caller whose Session keeps the default (`True`) gets expired objects back from the repository (attributes reload on access).
+- [ ] **Duplicates are only suppressed, not blocked:** the advisory lock plus the 2-minute window stops identical simultaneous or quick repeat submissions; it is not rate limiting.
+
+### Parked: 4a small items
+- Retention updates with `IN (ids)`: on a huge backlog (over 65535 leads at once) Postgres' bind-parameter limit would fail. Fix by batching if volumes ever need it.
+- The 120 s duplicate window has no upper bound on lead timestamps by design (a lead stamped later than `now` still counts); revisit if clocks can drift.
+- `run_retention` does not call `engine.dispose()`; harmless for a one-shot script, add it if the script grows.
 
 ### Parked: redactor hardening (decided 2026-10-22: not now)
 Done already: emails, phones, cards, IBANs, Versichertennummer become `[NUMBER]`; dates in d.m.yyyy, d/m/yyyy, d-m-yyyy, yyyy-m-d and times are kept.
