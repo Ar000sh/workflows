@@ -83,7 +83,7 @@ class Lead(Base):
     needs_manual_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     status: Mapped[str] = mapped_column(String(30), default=LeadStatus.NEW.value)
     anonymized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # sha256 hex of lower-cased email + newline + stripped message; blanked by retention.
+    # sha256 hex of lower-cased email + NUL + stripped message; blanked by retention.
     dedup_key: Mapped[str | None] = mapped_column(Text)
 
 
