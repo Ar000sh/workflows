@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timedelta
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
 from lead_responder.db.models import Lead, LeadStatus, Reply, ReplyStatus
@@ -194,6 +194,40 @@ class Repository:
         return list(self.session.scalars(
             select(Reply).where(Reply.lead_id == lead_id).order_by(Reply.created_at, Reply.id)
         ))
+
+    # DSGVO retention: blank the personal data of every lead created BEFORE `cutoff` (strictly:
+    # a lead exactly at the cutoff stays) that is not anonymized yet. Reply texts and the
+    # dedup_key hash count as personal data too. Category, risk, urgency, language, statuses and
+    # timestamps stay, so the statistics survive. Audit rows are not touched (they only point
+    # at ids). Leads and replies change in ONE transaction; the `anonymized_at IS NULL` filter
+    # makes a second run a no-op. Returns how many leads were changed.
+    def anonymize_older_than(self, *, cutoff: datetime, now: datetime) -> int:
+        _require_aware("cutoff", cutoff)
+        _require_aware("now", now)
+        try:
+            # FOR UPDATE: a concurrent run waits here, then finds nothing left to do.
+            ids = list(self.session.scalars(
+                select(Lead.id)
+                .where(Lead.created_at < cutoff, Lead.anonymized_at.is_(None))
+                .with_for_update()
+            ))
+            if ids:
+                self.session.execute(
+                    update(Reply).where(Reply.lead_id.in_(ids)).values(body="[anonymized]", ai_body=None)
+                )
+                self.session.execute(
+                    update(Lead).where(Lead.id.in_(ids)).values(
+                        name="[anonymized]", email="", phone=None, message="",
+                        dedup_key=None, anonymized_at=now,
+                    )
+                )
+            self.session.commit()
+            # Loaded Lead/Reply objects in this session are now stale; drop them so callers re-read.
+            self.session.expire_all()
+            return len(ids)
+        except BaseException:
+            self.session.rollback()
+            raise
 
     def _require(self, lead_id: int) -> Lead:
         lead = self.session.get(Lead, lead_id)
