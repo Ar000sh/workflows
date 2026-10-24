@@ -19,6 +19,7 @@ Table: decision, choice, why. Mark which were Tariq's and which are Claude's cal
 
 ## 5. Architecture and components
 Diagram, one responsibility per unit, what each depends on.
+If the project has an API and a database, say where each rule lives (the usual layering): the API validates input; a service holds the business rules and owns the transaction; the repository is database access only (queries, locks); the database enforces hard limits. A rule that lives in two layers needs a stated reason.
 
 ## 6. Data and flows
 Data model, what is sent to the AI (minimized), retention.

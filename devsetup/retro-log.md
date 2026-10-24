@@ -2,6 +2,24 @@
 
 > One entry per `/retro`. Newest first. Records what we found, where each finding went, and what we decided not to do, so the next retro can check whether it helped.
 
+## 2026-10-24: A1 layer 4a (first run of `/retro`)
+**Trigger:** 4a built, reviewed and attacked twice. **Result:** 10 findings, 5 built, 1 waiting for Tariq, 4 dropped.
+
+| # | Finding | Went to | Notes |
+|---|---|---|---|
+| 1 | A new lock needs a two-session test; strength must match the next write; locking changes after review get an attack pass | CLAUDE.md rule "Shared data, two actors" | Tariq merged findings 1 and 2 (rule instead of a separate checklist) |
+| 2 | Stateful-code checklist in `safety-patterns.md` | dropped | Covered by 1 |
+| 3 | Concurrency variant of the attacker brief | dropped | The brief used on 2026-10-24 is in the conversation; revisit if the rule gets used |
+| 4 | One layer per rule | spec template section 5 | Tariq's correction: business rules and the transaction belong in a service, the repository is database access only; recorded in the A1 REVIEW.md as a 4b decision |
+| 5 | Comment style | CLAUDE.md, reworded existing rule | Short, why not history, one line per index/constraint, every lock says which and why |
+| 6 | Review starts with an overview | CLAUDE.md, REVIEW.md rule | |
+| 7 | Decisions made in chat not in PROJECT.md | waiting | Tariq asked for an explanation first |
+| 8 | Stop and explain when Tariq is confused | feedback memory | Hypothesis from three occurrences |
+| 9 | Commit gate grew from 13 s to 44 s (limit 90 s) | dropped for now | Watch it; the race tests wait one second each |
+| 10 | `core.bare` was true once | dropped | One occurrence, no recurrence in about 15 suite runs |
+
+**Follow-ups:** at the next layer, check whether the two-session-test rule was followed, whether the review began from the overview, and whether the gate time is still under half the limit.
+
 ## 2026-10-22: A1 core review (first retro, done by hand)
 **Trigger:** finishing the layers 1-3 review. **Result:** 14 findings, 11 built, 3 shaped by Tariq's answers.
 
