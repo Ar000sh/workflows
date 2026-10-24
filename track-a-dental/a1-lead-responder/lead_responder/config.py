@@ -28,6 +28,17 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD") or None
 SMTP_TIMEOUT_SECONDS = float(os.environ.get("SMTP_TIMEOUT_SECONDS", "10"))
 MAIL_FROM = os.environ.get("MAIL_FROM", "")
 
+# Layer 4b: intake limits (services/intake.py). Per mailbox: more than _HOUR leads in the last hour
+# or more than _DAY in the last day (the new lead included) are saved with no email and no AI.
+# Above MAX_AI_LEADS_PER_HOUR leads in the last hour (all addresses), or with all
+# MAX_CONCURRENT_PIPELINES busy, a lead gets the fixed acknowledgment instead of the AI. A pipeline
+# run that takes longer than PIPELINE_DEADLINE_SECONDS is given up for the fixed acknowledgment.
+MAX_LEADS_PER_EMAIL_HOUR = int(os.environ.get("MAX_LEADS_PER_EMAIL_HOUR", "3"))
+MAX_LEADS_PER_EMAIL_DAY = int(os.environ.get("MAX_LEADS_PER_EMAIL_DAY", "10"))
+MAX_AI_LEADS_PER_HOUR = int(os.environ.get("MAX_AI_LEADS_PER_HOUR", "60"))
+MAX_CONCURRENT_PIPELINES = int(os.environ.get("MAX_CONCURRENT_PIPELINES", "10"))
+PIPELINE_DEADLINE_SECONDS = float(os.environ.get("PIPELINE_DEADLINE_SECONDS", "45"))
+
 # Layer 4b: the sweep (scripts/run_sweep.py). An acknowledgment claimed longer than
 # SENDING_TIMEOUT_MINUTES ago with no result is resent, at most MAX_SEND_ATTEMPTS claims in all;
 # a lead older than NO_REPLY_SWEEP_MINUTES with no first reply gets the fallback acknowledgment.
