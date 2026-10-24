@@ -21,10 +21,6 @@ from lead_responder.router import Action, Decision
 
 DUPLICATE_WINDOW = timedelta(minutes=2)
 
-# Same limits as the CHECK constraints in db/models.py. We check here first so the caller
-# gets a clear ValueError; the CHECKs stay as the last line of defence.
-MAX_NAME, MAX_EMAIL, MAX_PHONE, MAX_MESSAGE = 200, 254, 50, 10_000
-
 # Width of leads.language, read from the model so the two cannot drift apart.
 LANGUAGE_MAX = Lead.__table__.c.language.type.length
 
@@ -40,12 +36,6 @@ def _clean(value: str) -> str:
     return value.replace(chr(0), "")
 
 
-# Length is checked AFTER cleaning, because that is what would be stored.
-def _check_len(field: str, value: str, limit: int) -> None:
-    if len(value) > limit:
-        raise ValueError(f"{field} is too long ({len(value)} > {limit} characters)")
-
-
 # We only accept timezone-aware datetimes: a naive one would silently mean "server local time".
 def _require_aware(field: str, value: datetime) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
@@ -53,8 +43,8 @@ def _require_aware(field: str, value: datetime) -> None:
 
 
 # Fingerprint of "same person, same message": lower-cased email + NUL + stripped message.
-# The separator must be a character that cannot occur in either input. _clean() removes NUL
-# from all text, so callers MUST pass cleaned values (create_lead_if_new does, before this call).
+# The separator must be a character that cannot occur in either input. LeadIn (api/schemas.py)
+# removes NUL from all form text, so callers MUST pass LeadIn-cleaned values.
 # With a newline as separator, ("x@y.de<newline>A", "Q") and ("x@y.de", "A<newline>Q") collided
 # and the second, different patient was dropped as a duplicate.
 def _dedup_key(email: str, message: str) -> str:
@@ -79,21 +69,14 @@ class Repository:
     # Creates a lead unless the same person sent the same message in the last 2 minutes.
     # The advisory lock makes "look, then insert" atomic: two simultaneous identical
     # submissions queue up on the lock, so the second one sees the first one's row.
-    # The lock is released automatically at commit/rollback.
+    # The lock is released automatically at commit/rollback. The fields must already be validated
+    # and cleaned by LeadIn; the database CHECKs reject anything that slipped through.
     def create_lead_if_new(
         self, *, name: str, email: str, phone: str | None, message: str,
         consent_at: datetime, now: datetime, channel: str = "web_form",
     ) -> tuple[Lead, bool]:
         _require_aware("now", now)
         _require_aware("consent_at", consent_at)
-        name, email, message = _clean(name), _clean(email), _clean(message)
-        phone = _clean(phone) if phone is not None else None
-        _check_len("name", name, MAX_NAME)
-        _check_len("email", email, MAX_EMAIL)
-        _check_len("message", message, MAX_MESSAGE)
-        if phone is not None:
-            _check_len("phone", phone, MAX_PHONE)
-
         key = _dedup_key(email, message)
         try:
             self.session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _lock_id(key)})

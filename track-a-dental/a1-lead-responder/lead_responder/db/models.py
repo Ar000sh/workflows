@@ -15,6 +15,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from lead_responder.limits import MAX_EMAIL, MAX_MESSAGE, MAX_NAME, MAX_PHONE
+
 
 class LeadStatus(StrEnum):
     NEW = "new"
@@ -84,10 +86,10 @@ class Lead(Base):
         CheckConstraint(_in_list("status", LeadStatus), name="ck_leads_status"),
         # Length limits as CHECKs (not VARCHAR(n)): an overlong value then raises IntegrityError,
         # the same error family as every other rule, instead of a separate DataError.
-        CheckConstraint("char_length(name) <= 200", name="ck_leads_name_len"),
-        CheckConstraint("char_length(email) <= 254", name="ck_leads_email_len"),
-        CheckConstraint("char_length(phone) <= 50", name="ck_leads_phone_len"),
-        CheckConstraint("char_length(message) <= 10000", name="ck_leads_message_len"),
+        CheckConstraint(f"char_length(name) <= {MAX_NAME}", name="ck_leads_name_len"),
+        CheckConstraint(f"char_length(email) <= {MAX_EMAIL}", name="ck_leads_email_len"),
+        CheckConstraint(f"char_length(phone) <= {MAX_PHONE}", name="ck_leads_phone_len"),
+        CheckConstraint(f"char_length(message) <= {MAX_MESSAGE}", name="ck_leads_message_len"),
         # An index is a sorted lookup list: without one, Postgres reads every row to answer a query.
         # Each one below costs a little on every insert, so only the queries we really run get one.
         # Dashboard lists newest first, and retention asks "older than 90 days" (range on time).

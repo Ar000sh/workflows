@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select, text, update
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from lead_responder.db.models import Lead, LeadStatus, ReplyStatus
@@ -110,10 +111,13 @@ def test_create_blocks_on_the_advisory_lock_until_holder_commits(engine, session
     assert count_leads(session) == 1
 
 
-def test_nul_bytes_are_stripped(session):
-    lead, _ = Repository(session).create_lead_if_new(**payload(name="a\x00b", message="hi\x00 there"))
-    assert lead.name == "ab"
-    assert lead.message == "hi there"
+# The repository no longer strips NUL (LeadIn does, see test_schemas.py); Postgres refuses it.
+def test_nul_bytes_are_refused_by_the_database(session):
+    with pytest.raises(DBAPIError):
+        Repository(session).create_lead_if_new(**payload(name="a\x00b"))
+    assert count_leads(session) == 0
+    Repository(session).create_lead_if_new(**payload())  # the session is still usable
+    assert count_leads(session) == 1
 
 
 def test_sql_metacharacters_are_stored_literally(session):
@@ -130,16 +134,21 @@ def test_emoji_and_long_message_roundtrip(session):
     lead, _ = repo.create_lead_if_new(**payload(message=ok))
     session.expire_all()
     assert session.get(Lead, lead.id).message == ok
-    with pytest.raises(ValueError):
+    # 10,001 characters: the CHECK constraint is the last line of defence (LeadIn is the first).
+    with pytest.raises(IntegrityError):
         repo.create_lead_if_new(**payload(message=ok + "x"))
     assert count_leads(session) == 1
 
 
 @pytest.mark.parametrize("field,limit", [("name", 200), ("email", 254), ("phone", 50)])
-def test_overlong_fields_raise_value_error(session, field, limit):
-    with pytest.raises(ValueError):
-        Repository(session).create_lead_if_new(**payload(**{field: "x" * (limit + 1)}))
+def test_overlong_fields_hit_the_check_constraint(session, field, limit):
+    repo = Repository(session)
+    with pytest.raises(IntegrityError):
+        repo.create_lead_if_new(**payload(**{field: "x" * (limit + 1)}))
     assert count_leads(session) == 0
+    # The failed call rolled back, so the same session still works.
+    repo.create_lead_if_new(**payload())
+    assert count_leads(session) == 1
 
 
 def test_naive_datetimes_are_rejected(session):
