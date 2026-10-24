@@ -183,6 +183,10 @@ Read this before writing the next spec or plan. The rule behind most items: **ea
 - The 120 s duplicate window has no upper bound on lead timestamps by design (a lead stamped later than `now` still counts); revisit if clocks can drift.
 - `run_retention` does not call `engine.dispose()`; harmless for a one-shot script, add it if the script grows.
 
+### Parked: 4b
+- **Global cap on emails sent per hour (4b probe P4, parked 2026-10-24, Tariq).** The per-mailbox cap does not stop one visitor from sending each of many different victims one fixed acknowledgment (a low-grade mail relay for the acknowledgment text and the sanitized name). Idea: `MAX_EMAILS_PER_HOUR` (default about 120); above it the lead is saved, flagged and `send_suppressed`, no email. Take it up before the form is on a real public site, together with the per-IP limits and captcha deferred in A1 section 12.
+- **Cancellable LLM calls.** A pipeline run that outlives its 45 s deadline keeps running and spends its few cents; making `shared/llm.py` cancellable would stop that (4b spec, section 4).
+
 ### Parked: redactor hardening (decided 2026-10-22: not now)
 Done already: emails, phones, cards, IBANs, Versichertennummer become `[NUMBER]`; dates in d.m.yyyy, d/m/yyyy, d-m-yyyy, yyyy-m-d and times are kept.
 Known gaps, in order of value, if we ever come back to them:
