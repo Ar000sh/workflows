@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from lead_responder import retention
 from lead_responder.db.models import AuditLog, Lead, LeadStatus, Reply, ReplyStatus
+from lead_responder.limits import mailbox_key
 from lead_responder.repository import Repository
 from lead_responder.router import Action
 
@@ -21,7 +22,8 @@ CUTOFF = NOW - timedelta(days=90)
 def make_lead(repo: Repository, created: datetime, email="anna@example.com", **kw):
     lead, _ = repo.create_lead_if_new(
         name="Anna Test", email=email, phone="0511 123456",
-        message="Ich habe Zahnschmerzen.", consent_at=created, now=created, **kw,
+        message="Ich habe Zahnschmerzen.", consent_at=created, now=created,
+        mailbox_key=mailbox_key(email), **kw,
     )
     return lead
 
@@ -85,8 +87,7 @@ def test_reply_texts_and_dedup_key_are_blanked_too(session):
 def test_retention_blanks_mailbox_key(session):
     repo = Repository(session)
     lead = make_lead(repo, CUTOFF - timedelta(days=1))
-    lead.mailbox_key = "anna@example.com"
-    session.commit()
+    assert lead.mailbox_key == "anna@example.com"  # stored by create_lead_if_new
 
     assert repo.anonymize_older_than(cutoff=CUTOFF, now=NOW) == 1
 

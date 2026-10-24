@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timedelta
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from lead_responder.db.models import (
@@ -20,6 +20,15 @@ from lead_responder.models import Classification
 from lead_responder.router import Action, Decision
 
 DUPLICATE_WINDOW = timedelta(minutes=2)
+
+# The reply kinds that count as a lead's "first reply": a lead gets at most one of them.
+# A staff draft is not one (it comes later and needs approval).
+FIRST_REPLY_KINDS = (Action.ACKNOWLEDGMENT, Action.AUTO_REPLY)
+# Lead statuses that are still waiting for their first reply (acknowledge_lead and the sweep).
+AWAITING_FIRST_REPLY = (LeadStatus.NEW, LeadStatus.CLASSIFIED, LeadStatus.ACKNOWLEDGED)
+# suppress_lead's only allowed move: a narrower table than LEAD_TRANSITIONS (which also allows
+# classified -> acknowledged), so _move_status checks "status is new" in its one UPDATE.
+SUPPRESS_TRANSITIONS = {LeadStatus.NEW: frozenset({LeadStatus.ACKNOWLEDGED})}
 
 # Width of leads.language, read from the model so the two cannot drift apart.
 LANGUAGE_MAX = Lead.__table__.c.language.type.length
@@ -71,9 +80,10 @@ class Repository:
     # submissions queue up on the lock, so the second one sees the first one's row.
     # The lock is released automatically at commit/rollback. The fields must already be validated
     # and cleaned by LeadIn; the database CHECKs reject anything that slipped through.
+    # mailbox_key (limits.mailbox_key of the email) is stored so the per-address limit can count it.
     def create_lead_if_new(
         self, *, name: str, email: str, phone: str | None, message: str,
-        consent_at: datetime, now: datetime, channel: str = "web_form",
+        consent_at: datetime, now: datetime, mailbox_key: str, channel: str = "web_form",
     ) -> tuple[Lead, bool]:
         _require_aware("now", now)
         _require_aware("consent_at", consent_at)
@@ -95,6 +105,7 @@ class Repository:
             lead = Lead(
                 channel=channel, name=name, email=email, phone=phone, message=message,
                 consent_at=consent_at, created_at=now, status=LeadStatus.NEW.value, dedup_key=key,
+                mailbox_key=mailbox_key,
             )
             self.session.add(lead)
             self.session.commit()
@@ -115,16 +126,31 @@ class Repository:
             self.session.rollback()
             raise
 
+    # One reply, reloaded from the database; None for an unknown id. Same handling as get_lead.
+    def get_reply(self, reply_id: int) -> Reply | None:
+        try:
+            reply = self.session.get(Reply, reply_id, populate_existing=True)
+            self.session.commit()
+            return reply
+        except BaseException:
+            self.session.rollback()
+            raise
+
     # Stores the classifier's result and the router's flags. The classification can be None
     # (the AI failed); the flags from the decision are then still saved so staff see the lead.
     # Refuses an anonymized lead: new text about the patient would never be cleaned again.
-    # It updates the lead row, so it locks it with the stronger FOR NO KEY UPDATE (see below).
+    # Only while the lead is still "new" (InvalidTransition otherwise): a pipeline result that
+    # arrives after the deadline fallback already acknowledged the lead is discarded, not written.
+    # It updates the lead row, so it locks it with the stronger FOR NO KEY UPDATE (see below). The
+    # status is read AFTER the lock, so a writer that is moving the status right now is waited for.
     def set_classification(
         self, lead_id: int, *, classification: Classification | None, decision: Decision,
     ) -> Lead:
         try:
-            lead = self._require(lead_id)
             self._refuse_if_anonymized(lead_id, will_update_lead=True)
+            lead = self._require(lead_id, fresh=True)
+            if lead.status != LeadStatus.NEW.value:
+                raise InvalidTransition(f"lead {lead_id}: classification only while the lead is new")
             if classification is not None:
                 lead.category = classification.category.value
                 lead.risk = classification.risk.value
@@ -149,6 +175,93 @@ class Repository:
             raise ValueError(f"status must be a LeadStatus, got {status!r}")
         try:
             lead = self._move_status(Lead, lead_id, status, LEAD_TRANSITIONS, {})
+            self.session.commit()
+            return lead
+        except BaseException:
+            self.session.rollback()
+            raise
+
+    # The FIRST reply of a lead (an acknowledgment or an auto-reply), written by whoever gets there
+    # first: the pipeline, the deadline fallback or the sweep. Exactly one of them wins; every other
+    # gets InvalidTransition and writes nothing, so the patient gets one email, not two.
+    # The status move and the reply insert must be one step, or a crash leaves a lead that looks
+    # handled with no reply: both happen in this one transaction and are rolled back together.
+    # Steps, all under one row lock on the lead:
+    #   1. lock the lead FOR NO KEY UPDATE and refuse an anonymized one (ValueError). The strong lock
+    #      at once, because step 3 updates the lead row: taking FOR SHARE first and upgrading later
+    #      deadlocks two writers (the 4a lesson). The lock makes all writers of one lead take turns.
+    #   2. refuse if the lead already has a first reply (kind acknowledgment or auto_reply). Read
+    #      after the lock, so the loser of the race sees the winner's committed reply. This check is
+    #      the real guard: an "acknowledged" lead without a reply is allowed (the sweep's case).
+    #   3. ACKNOWLEDGMENT moves new/classified -> acknowledged (an acknowledged lead stays);
+    #      AUTO_REPLY never moves the status (the pipeline moves it to auto_replied after the send).
+    #      Any other status is past the first reply: InvalidTransition.
+    #   4. insert the reply as "drafted" (the sender claims it next) and commit.
+    # Lock order is the same as retention's (lead, then replies), so the two cannot deadlock.
+    def acknowledge_lead(
+        self, lead_id: int, *, kind: Action, ai_body: str | None, body: str, now: datetime,
+        needs_manual_review: bool = False,
+    ) -> Reply:
+        # isinstance first: Action is a StrEnum, so a plain "acknowledgment" string would pass `in`.
+        if not isinstance(kind, Action) or kind not in FIRST_REPLY_KINDS:
+            raise ValueError(f"kind must be ACKNOWLEDGMENT or AUTO_REPLY, got {kind!r}")
+        _require_aware("now", now)
+        try:
+            self._refuse_if_anonymized(lead_id, will_update_lead=True)
+            status = self.session.scalar(select(Lead.status).where(Lead.id == lead_id))
+            if status is None:
+                raise LookupError(f"lead {lead_id} not found")
+            if self._has_first_reply(lead_id):
+                raise InvalidTransition(f"lead {lead_id} already has a first reply")
+            flags = {"needs_manual_review": True} if needs_manual_review else {}
+            if kind is Action.ACKNOWLEDGMENT and status in (LeadStatus.NEW, LeadStatus.CLASSIFIED):
+                self._move_status(Lead, lead_id, LeadStatus.ACKNOWLEDGED, LEAD_TRANSITIONS, flags)
+            elif status in AWAITING_FIRST_REPLY:
+                if flags:
+                    self.session.execute(update(Lead).where(Lead.id == lead_id).values(**flags))
+            else:
+                raise InvalidTransition(f"lead {lead_id}: no first reply from status {status}")
+            reply = Reply(
+                lead_id=lead_id, kind=kind.value,
+                ai_body=_clean(ai_body) if ai_body is not None else None,
+                body=_clean(body), status=ReplyStatus.DRAFTED.value, created_at=now,
+            )
+            self.session.add(reply)
+            self.session.commit()
+            return reply
+        except BaseException:
+            self.session.rollback()
+            raise
+
+    # "No email on purpose": the per-address limit tripped. The lead moves new -> acknowledged with
+    # no reply, flagged for staff, and send_suppressed tells the sweep to leave it alone (otherwise
+    # the sweep would send the very email the limit stopped). Only from "new" (InvalidTransition
+    # otherwise): the limit is checked right after the lead is saved, before anything else ran.
+    # Refuses an anonymized lead (ValueError) under FOR NO KEY UPDATE, because it updates the lead row.
+    def suppress_lead(self, lead_id: int) -> Lead:
+        try:
+            self._refuse_if_anonymized(lead_id, will_update_lead=True)
+            lead = self._move_status(
+                Lead, lead_id, LeadStatus.ACKNOWLEDGED, SUPPRESS_TRANSITIONS,
+                {"send_suppressed": True, "needs_manual_review": True},
+            )
+            self.session.commit()
+            return lead
+        except BaseException:
+            self.session.rollback()
+            raise
+
+    # Puts a lead on the staff review list without touching its status (e.g. the deadline expired
+    # or a send gave up). One UPDATE, which locks the row itself; no read first, so nothing to race.
+    # Allowed on an anonymized lead: a flag is not personal data.
+    def flag_for_review(self, lead_id: int) -> Lead:
+        try:
+            lead = self.session.scalars(
+                update(Lead).where(Lead.id == lead_id).values(needs_manual_review=True).returning(Lead),
+                execution_options={"populate_existing": True},
+            ).one_or_none()
+            if lead is None:
+                raise LookupError(f"lead {lead_id} not found")
             self.session.commit()
             return lead
         except BaseException:
@@ -239,6 +352,57 @@ class Repository:
         except BaseException:
             self.session.rollback()
             raise
+
+    # How many leads for one mailbox arrived at or after `since` (created_at >= since). The
+    # per-address limit calls it right after saving the new lead, so the count includes that lead.
+    # Served by ix_leads_mailbox_key_created_at (equal key, then a time range).
+    def count_leads_for_mailbox_since(self, mailbox_key: str, since: datetime) -> int:
+        _require_aware("since", since)
+        return self._count(Lead.mailbox_key == mailbox_key, Lead.created_at >= since)
+
+    # How many leads arrived at or after `since`, for the global cap on AI runs per hour.
+    # Served by ix_leads_created_at.
+    def count_leads_since(self, since: datetime) -> int:
+        _require_aware("since", since)
+        return self._count(Lead.created_at >= since)
+
+    # Sweep part 1: replies of one kind stuck in "sending" (outcome unknown) whose claim is older
+    # than `claimed_before` (strictly) and that have been tried fewer than `max_attempts` times.
+    # The sweep asks only for acknowledgments; a draft is never resent automatically.
+    # A plain read, no lock: the sweep then moves each one with a conditional status change,
+    # which is what stops two sweeps from both acting on the same reply.
+    def stuck_sending_replies(
+        self, *, kind: Action, claimed_before: datetime, max_attempts: int,
+    ) -> list[Reply]:
+        if not isinstance(kind, Action):
+            raise ValueError(f"kind must be an Action, got {kind!r}")
+        _require_aware("claimed_before", claimed_before)
+        return self._read_all(
+            select(Reply)
+            .where(
+                Reply.kind == kind.value, Reply.status == ReplyStatus.SENDING.value,
+                Reply.claimed_at < claimed_before, Reply.send_attempts < max_attempts,
+            )
+            .order_by(Reply.id)
+        )
+
+    # Sweep part 2: leads created before `created_before` (strictly) that are still waiting for a
+    # first reply (new, classified or acknowledged), not suppressed on purpose, not anonymized, and
+    # with no acknowledgment or auto-reply. A plain read, no lock: the sweep acts on each through
+    # acknowledge_lead, whose lock and checks decide who wins.
+    def leads_without_first_reply(self, *, created_before: datetime) -> list[Lead]:
+        _require_aware("created_before", created_before)
+        return self._read_all(
+            select(Lead)
+            .where(
+                Lead.status.in_([s.value for s in AWAITING_FIRST_REPLY]),
+                Lead.send_suppressed.is_(False),
+                Lead.anonymized_at.is_(None),
+                Lead.created_at < created_before,
+                ~self._first_reply_exists(Lead.id),
+            )
+            .order_by(Lead.id)
+        )
 
     # DSGVO retention: blank the personal data of every lead created BEFORE `cutoff` (strictly:
     # a lead exactly at the cutoff stays) that is not anonymized yet. Reply texts, reply errors
@@ -339,8 +503,42 @@ class Repository:
             )
         return row
 
-    def _require(self, lead_id: int) -> Lead:
-        lead = self.session.get(Lead, lead_id)
+    # EXISTS (a reply of kind acknowledgment or auto_reply for this lead). `lead_id` is a value or a
+    # column (Lead.id), so the same condition serves acknowledge_lead and the sweep query.
+    def _first_reply_exists(self, lead_id):
+        return (
+            select(Reply.id)
+            .where(Reply.lead_id == lead_id, Reply.kind.in_([k.value for k in FIRST_REPLY_KINDS]))
+            .exists()
+        )
+
+    def _has_first_reply(self, lead_id: int) -> bool:
+        return bool(self.session.scalar(select(self._first_reply_exists(lead_id))))
+
+    # select(count) WHERE <conditions>, ending its transaction like the other reads.
+    def _count(self, *conditions) -> int:
+        try:
+            n = self.session.scalar(select(func.count()).select_from(Lead).where(*conditions))
+            self.session.commit()
+            return n
+        except BaseException:
+            self.session.rollback()
+            raise
+
+    # Runs a SELECT of ORM rows, reloads them fresh, ends the transaction (same as replies_for).
+    def _read_all(self, stmt) -> list:
+        try:
+            rows = list(self.session.scalars(stmt, execution_options={"populate_existing": True}))
+            self.session.commit()
+            return rows
+        except BaseException:
+            self.session.rollback()
+            raise
+
+    # fresh=True reloads from the database instead of trusting this session's cached copy (needed
+    # when the caller decides something from the row, e.g. its status, after taking the lock).
+    def _require(self, lead_id: int, *, fresh: bool = False) -> Lead:
+        lead = self.session.get(Lead, lead_id, populate_existing=fresh)
         if lead is None:
             raise LookupError(f"lead {lead_id} not found")
         return lead

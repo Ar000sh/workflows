@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from lead_responder.db.models import Reply, ReplyStatus
+from lead_responder.limits import mailbox_key
 from lead_responder.repository import InvalidTransition, Repository
 from lead_responder.router import Action
 
@@ -21,6 +22,7 @@ def make_lead(repo: Repository, **overrides):
         message="Ich moechte einen Termin.", consent_at=NOW, now=NOW,
     )
     fields.update(overrides)
+    fields.setdefault("mailbox_key", mailbox_key(fields["email"]))
     lead, _ = repo.create_lead_if_new(**fields)
     return lead
 

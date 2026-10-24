@@ -10,6 +10,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from lead_responder.db.models import Lead, LeadStatus, ReplyStatus
+from lead_responder.limits import mailbox_key
 from lead_responder.models import Category, Classification, Risk, Urgency
 from lead_responder.repository import InvalidTransition, Repository, _dedup_key, _lock_id
 from lead_responder.router import Action, Decision
@@ -23,6 +24,7 @@ def payload(**overrides) -> dict:
         message="Ich moechte einen Termin.", consent_at=NOW, now=NOW,
     )
     fields.update(overrides)
+    fields.setdefault("mailbox_key", mailbox_key(fields["email"]))
     return fields
 
 
