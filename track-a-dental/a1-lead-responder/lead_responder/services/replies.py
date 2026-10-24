@@ -1,12 +1,14 @@
 """ReplyService: sends one reply by email, exactly once, and records what happened.
 
 The flow of send(reply_id) (spec section 6 "Sending"):
-  1. read the reply and its lead (fresh from the database); no address left -> refuse, no claim
-  2. check the kind may be sent from its status (a draft needs staff approval first)
+  1. read the reply (fresh from the database)
+  2. check the kind may be sent from its status (a draft needs staff approval first; a reply in
+     "sending" belongs to whoever claimed it), then read the lead: no address -> refuse, no claim
   3. CLAIM: reply -> "sending" in one conditional UPDATE that commits. Only the winner continues;
      a second worker or a double click gets "already handled" and sends nothing
   4. read the address again (retention may have blanked it meanwhile), then call the sender with
-     no transaction open and no connection held: a slow SMTP server must not block other writers
+     no transaction open and no connection held: a slow SMTP server must not block other writers.
+     A sender that raises instead of returning a result counts as a timeout (in doubt)
   5. record "sent" or "failed"; a timeout records nothing, so the reply stays "sending" (unknown)
   6. for a first reply, fix the lead: an auto-reply that went out makes the lead "auto_replied";
      one that failed or is in doubt puts the lead in the staff queue instead
@@ -51,6 +53,8 @@ SEND_FROM: dict[Action, frozenset[ReplyStatus]] = {
     Action.DRAFT: frozenset({ReplyStatus.APPROVED, ReplyStatus.FAILED}),
 }
 # A refused reply in one of these moves to "failed" (the table allows it); a failed one stays.
+# "sending" is passed only by the claim's owner after its own claim: step 1 sends a reply in
+# "sending" away as ALREADY_HANDLED before the address check, so it never moves another's claim.
 _REFUSE_TO_FAILED = (ReplyStatus.DRAFTED, ReplyStatus.APPROVED, ReplyStatus.SENDING)
 
 
@@ -110,20 +114,22 @@ class ReplyService:
     def _send(self, reply_id: int, *, subject_language: str | None) -> SendOutcome:
         with self._session_factory() as session:
             repo = Repository(session)
-            # Step 1: fresh reads; each Repository call commits, so no snapshot is kept.
+            # Step 1: fresh read; each Repository call commits, so no snapshot is kept.
             reply = repo.get_reply(reply_id)
             if reply is None:
                 raise LookupError(f"reply {reply_id} not found")
             kind, status, lead_id = Action(reply.kind), ReplyStatus(reply.status), reply.lead_id
-            lead = repo.get_lead(lead_id)
-            if _no_address(lead):
-                return self._refuse(repo, reply_id, status)
-            # Step 2: the service's rule on top of the transition table.
+            # Step 2 (before the address check): the service's rule on top of the transition table.
+            # First, so an unapproved draft is never moved (drafted -> failed would make it
+            # sendable without approval) and a reply another worker is sending is never touched.
             if status not in SEND_FROM[kind]:
                 if kind is Action.DRAFT and status is ReplyStatus.DRAFTED:
                     log.warning("reply %s: refused, draft not approved", reply_id)
                     return SendOutcome.REFUSED
                 return SendOutcome.ALREADY_HANDLED
+            lead = repo.get_lead(lead_id)
+            if _no_address(lead):
+                return self._refuse(repo, reply_id, status)
             # Step 3: the claim. It commits before anything is sent; the loser stops here.
             try:
                 claimed = repo.set_reply_status(reply_id, ReplyStatus.SENDING, now=self._clock())
@@ -139,7 +145,13 @@ class ReplyService:
             # close() ends any transaction and gives the connection back to the pool for the
             # duration of the send; the Session is reusable afterwards for the recording.
             session.close()
-            result = self._sender.send(to=to, subject=subject, body=body)
+            try:
+                result = self._sender.send(to=to, subject=subject, body=body)
+            except Exception as e:
+                # A sender must return a SendResult; one that raises after the claim may or may
+                # not have sent, so it counts as in doubt. Class name only: the text may hold the address.
+                log.error("reply %s: sender raised %s, outcome unknown", reply_id, type(e).__name__)
+                result = SendResult(Outcome.TIMEOUT, type(e).__name__)
             # Step 5 and 6.
             outcome = self._record(repo, reply_id, result)
             self._update_lead(repo, lead_id, kind, outcome)
@@ -183,6 +195,8 @@ class ReplyService:
     # and moves it classified -> acknowledged (the staff queue); a failed or in-doubt
     # acknowledgment only flags it (the lead is already "acknowledged"). Drafts change nothing here:
     # staff sent them and see the result. InvalidTransition = another writer already moved the lead.
+    # Best effort: a database error here is logged (class name only) and does not hide the send
+    # outcome, which the reply row already records. The flag and the move are tried separately.
     def _update_lead(self, repo: Repository, lead_id: int, kind: Action, outcome: SendOutcome) -> None:
         if kind is Action.DRAFT or outcome not in (SendOutcome.SENT, SendOutcome.FAILED, SendOutcome.IN_DOUBT):
             return
@@ -190,7 +204,10 @@ class ReplyService:
             if kind is Action.AUTO_REPLY:
                 self._move_lead(repo, lead_id, LeadStatus.AUTO_REPLIED)
             return
-        repo.flag_for_review(lead_id)
+        try:
+            repo.flag_for_review(lead_id)
+        except SQLAlchemyError as e:
+            log.error("lead %s: flagging for review failed (%s)", lead_id, type(e).__name__)
         if kind is Action.AUTO_REPLY:
             self._move_lead(repo, lead_id, LeadStatus.ACKNOWLEDGED)
 
@@ -200,3 +217,5 @@ class ReplyService:
             repo.set_lead_status(lead_id, status)
         except InvalidTransition:
             log.info("lead %s: not moved to %s, already moved by another writer", lead_id, status)
+        except SQLAlchemyError as e:
+            log.error("lead %s: moving to %s failed (%s)", lead_id, status, type(e).__name__)

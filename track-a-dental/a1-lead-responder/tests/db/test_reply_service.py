@@ -46,8 +46,8 @@ class RecordingSessionFactory:
 # transaction" (a lock or snapshot held across the send would show up there). `delay` keeps the
 # send in flight for a moment so two racing threads overlap.
 class FakeSender:
-    def __init__(self, engine, factory, outcome=Outcome.ACCEPTED, detail="", delay=0.0):
-        self.engine, self.factory = engine, factory
+    def __init__(self, engine, factory, outcome=Outcome.ACCEPTED, detail="", delay=0.0, raises=None):
+        self.engine, self.factory, self.raises = engine, factory, raises
         self.outcome, self.detail, self.delay = outcome, detail, delay
         self.calls: list[dict] = []
         self.open_transactions: list[bool] = []
@@ -65,6 +65,8 @@ class FakeSender:
             ))
         self.idle_in_transaction.append(n)
         time.sleep(self.delay)
+        if self.raises is not None:  # a sender that breaks its contract and raises
+            raise self.raises
         return SendResult(self.outcome, self.detail)
 
 
@@ -329,3 +331,70 @@ def test_acknowledge_with_fallback_sends_once_when_called_twice(session, factory
     assert sorted(results) == [False, True]
     assert len(sender.calls) == 1
     assert len(Repository(session).replies_for(lead.id)) == 1
+
+
+# A sender that raises instead of returning a SendResult (a future Sender, or e.g. a
+# UnicodeEncodeError inside smtplib) after the claim: the email may or may not have gone out, so
+# the reply stays "sending" (IN_DOUBT), and an auto-reply's lead still lands in the staff queue
+# instead of being stranded "classified" (the sweep never touches auto-replies).
+def test_sender_exception_after_claim_is_in_doubt_and_auto_reply_lead_goes_to_staff(
+    session, factory, practice, engine, caplog,
+):
+    repo = Repository(session)
+    lead, reply = make_ack(repo, kind=Action.AUTO_REPLY)
+    sender = FakeSender(engine, factory, raises=ValueError(f"bad address {EMAIL}"))
+    assert make_service(factory, practice, sender).send(reply.id) is SendOutcome.IN_DOUBT
+    assert repo.get_reply(reply.id).status == "sending"
+    got = repo.get_lead(lead.id)
+    assert (got.status, got.needs_manual_review) == ("acknowledged", True)
+    assert EMAIL not in caplog.text  # only the class name is logged
+
+
+# The lead update after the send is best effort: if the database fails there, send still returns
+# what happened to the email (the reply row already says it).
+@pytest.mark.parametrize("outcome, expected, broken", [
+    (Outcome.ACCEPTED, SendOutcome.SENT, "set_lead_status"),
+    (Outcome.FAILED, SendOutcome.FAILED, "flag_for_review"),
+    (Outcome.FAILED, SendOutcome.FAILED, "set_lead_status"),
+])
+def test_lead_update_failure_still_returns_the_send_outcome(
+    session, factory, practice, engine, monkeypatch, outcome, expected, broken,
+):
+    repo = Repository(session)
+    _, reply = make_ack(repo, kind=Action.AUTO_REPLY)
+
+    def down(self, *args, **kwargs):
+        raise OperationalError("UPDATE leads", {}, Exception("database down"))
+
+    monkeypatch.setattr(Repository, broken, down)
+    sender = FakeSender(engine, factory, outcome=outcome, detail="SomeError")
+    assert make_service(factory, practice, sender).send(reply.id) is expected
+    monkeypatch.undo()
+    assert repo.get_reply(reply.id).status == expected.value
+
+
+# The approval rule comes before the address check: a draft nobody approved stays "drafted" even
+# when its lead has no address, so it can never become "failed" and then be sent unapproved.
+def test_unapproved_draft_of_lead_without_address_stays_drafted(session, factory, practice, engine):
+    repo = Repository(session)
+    lead = make_lead(repo)
+    draft = repo.add_reply(lead.id, kind=Action.DRAFT, ai_body=None, body="Entwurf",
+                           status=ReplyStatus.DRAFTED, now=NOW)
+    repo.anonymize_older_than(cutoff=NOW + timedelta(days=1), now=NOW)
+    sender = FakeSender(engine, factory)
+    assert make_service(factory, practice, sender).send(draft.id) is SendOutcome.REFUSED
+    assert repo.get_reply(draft.id).status == "drafted"
+    assert sender.calls == []
+
+
+# Another worker holds the claim and is sending right now. A second caller must not touch the
+# reply, not even when the lead has lost its address: only the claim's owner moves it on.
+def test_reply_claimed_by_another_worker_is_already_handled_and_left_sending(session, factory, practice, engine):
+    repo = Repository(session)
+    _, reply = make_ack(repo)
+    repo.set_reply_status(reply.id, ReplyStatus.SENDING, now=NOW)  # the other worker's claim
+    repo.anonymize_older_than(cutoff=NOW + timedelta(days=1), now=NOW)
+    sender = FakeSender(engine, factory)
+    assert make_service(factory, practice, sender).send(reply.id) is SendOutcome.ALREADY_HANDLED
+    assert repo.get_reply(reply.id).status == "sending"
+    assert sender.calls == []

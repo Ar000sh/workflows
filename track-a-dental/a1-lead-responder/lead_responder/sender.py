@@ -5,9 +5,10 @@ say which one happened:
   ACCEPTED  the provider took the mail          -> reply "sent"
   FAILED    known NOT sent (refused, bad input) -> reply "failed", staff can resend
   TIMEOUT   unknown: it may have gone out       -> reply stays "sending", nobody resends blindly
-The retry policy lives here (A1 spec section 7): a refused or unreachable provider is tried up to
-3 more times, waiting 1, 2 and 4 seconds; a timeout is never retried, because the first attempt
-may already have been delivered and a retry would send the patient a second copy.
+The retry policy lives here (A1 spec section 7): a refused or unreachable provider (or a server
+that answers with a refusal) is tried up to 3 more times, waiting 1, 2 and 4 seconds. A timeout,
+or a connection lost while the message was being handed over, is never retried: the first attempt
+may already have been delivered and a retry would send the patient a second copy (see _attempt).
 """
 from __future__ import annotations
 
@@ -58,7 +59,8 @@ class SmtpSender:
     # attempt (a broken connection is never reused), each with the socket timeout.
     # A CR or LF in the recipient or subject would let the text after it become a new header
     # ("Bcc: ..."): refused before any connection is opened. Intake's email validation already
-    # forbids newlines; this is the last line of defence for any other caller.
+    # forbids newlines; this is the last line of defence for any other caller. Its detail
+    # "HeaderInjectionRefused" is a fixed marker, not an exception class name (nothing was raised).
     def send(self, *, to: str, subject: str, body: str) -> SendResult:
         if any(char in value for value in (to, subject) for char in "\r\n"):
             return SendResult(Outcome.FAILED, "HeaderInjectionRefused")
@@ -71,24 +73,57 @@ class SmtpSender:
 
         detail = ""
         for wait in (*RETRY_WAITS, None):
-            try:
-                self._deliver(msg)
-                return SendResult(Outcome.ACCEPTED)
-            except TimeoutError as e:  # socket.timeout is the same class since Python 3.10
-                return SendResult(Outcome.TIMEOUT, type(e).__name__)
-            except (OSError, smtplib.SMTPException) as e:  # refused, unreachable, auth, 4xx/5xx
-                detail = type(e).__name__
+            result = self._attempt(msg)
+            if result.outcome is not Outcome.FAILED:
+                return result
+            detail = result.detail
             if wait is None:
                 break
             self._sleep(wait)
         return SendResult(Outcome.FAILED, detail)
 
-    # One attempt: connect, optionally upgrade to TLS and log in, send. The `with` block sends QUIT
-    # and closes the socket whatever happens.
-    def _deliver(self, msg: EmailMessage) -> None:
-        with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as smtp:
-            if self.starttls:
-                smtp.starttls()
-            if self.user:
-                smtp.login(self.user, self.password or "")
-            smtp.send_message(msg)
+    # One attempt on a fresh connection; the `with` block sends QUIT and closes the socket.
+    # An error is judged by the STAGE it happened in, because that decides whether the patient
+    # may already have the email:
+    #   setup (connect, EHLO, STARTTLS, login): nothing of the message has left yet, so a refused
+    #       or dropped connection or an auth error is FAILED, and send() retries it;
+    #   send (send_message): the server answering with a refusal (4xx/5xx, recipients or sender
+    #       refused) means known not accepted: FAILED, retried. A dropped connection or any other
+    #       OSError may have happened after the body arrived: TIMEOUT (unknown), never retried.
+    #       Real smtplib turns a read timeout into SMTPServerDisconnected, so this matters;
+    #   done (send_message returned): the server accepted the mail; a bad QUIT changes nothing.
+    # A timeout at any stage is TIMEOUT, also when smtplib wrapped it (see _caused_by_timeout).
+    def _attempt(self, msg: EmailMessage) -> SendResult:
+        stage = "setup"
+        try:
+            with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as smtp:
+                if self.starttls:
+                    smtp.starttls()
+                if self.user:
+                    smtp.login(self.user, self.password or "")
+                stage = "send"
+                smtp.send_message(msg)
+                stage = "done"
+            return SendResult(Outcome.ACCEPTED)
+        except (OSError, smtplib.SMTPException) as e:  # SMTPException is an OSError; listed for clarity
+            name = type(e).__name__
+            if stage == "done":
+                return SendResult(Outcome.ACCEPTED)
+            if _caused_by_timeout(e):
+                return SendResult(Outcome.TIMEOUT, name)
+            refused = isinstance(e, (smtplib.SMTPResponseException, smtplib.SMTPRecipientsRefused))
+            if stage == "send" and not refused:
+                return SendResult(Outcome.TIMEOUT, name)
+            return SendResult(Outcome.FAILED, name)
+
+
+# True if the error is a timeout or was raised while handling one (smtplib re-raises a socket
+# timeout as SMTPServerDisconnected inside its `except OSError`, which sets __context__).
+def _caused_by_timeout(error: BaseException | None) -> bool:
+    seen = 0
+    while error is not None and seen < 10:  # the cap guards against a cyclic chain
+        if isinstance(error, TimeoutError):  # socket.timeout is the same class since Python 3.10
+            return True
+        error = error.__cause__ or error.__context__
+        seen += 1
+    return False
