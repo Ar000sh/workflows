@@ -41,7 +41,8 @@ PIPELINE_DEADLINE_SECONDS = float(os.environ.get("PIPELINE_DEADLINE_SECONDS", "4
 
 # Layer 4b: the sweep (scripts/run_sweep.py). An acknowledgment claimed longer than
 # SENDING_TIMEOUT_MINUTES ago with no result is resent, at most MAX_SEND_ATTEMPTS claims in all;
-# a lead older than NO_REPLY_SWEEP_MINUTES with no first reply gets the fallback acknowledgment.
+# a first reply left "drafted" (never claimed) longer than NO_REPLY_SWEEP_MINUTES is sent, and a
+# lead older than NO_REPLY_SWEEP_MINUTES with no first reply gets the fallback acknowledgment.
 SENDING_TIMEOUT_MINUTES = int(os.environ.get("SENDING_TIMEOUT_MINUTES", "10"))
 MAX_SEND_ATTEMPTS = int(os.environ.get("MAX_SEND_ATTEMPTS", "3"))
 NO_REPLY_SWEEP_MINUTES = int(os.environ.get("NO_REPLY_SWEEP_MINUTES", "5"))

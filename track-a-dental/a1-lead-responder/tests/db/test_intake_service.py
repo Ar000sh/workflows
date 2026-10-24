@@ -29,7 +29,7 @@ from lead_responder.db.models import Lead
 from lead_responder.models import Category, Classification, Risk, Urgency
 from lead_responder.pipeline import GeneratedReply, PipelineResult
 from lead_responder.repository import Repository
-from lead_responder.router import Action, decide
+from lead_responder.router import Action, decide, downgrade_failed_auto_reply
 from lead_responder.sender import Outcome, SendResult
 from lead_responder.services.intake import IntakeService, Received
 from lead_responder.services.replies import ReplyService
@@ -242,6 +242,62 @@ def test_unsupported_language_route_sends_combined_acknowledgment_no_draft(sessi
     assert [c["body"] for c in sender.calls] == ["Hallo / Hello"]
 
 
+# The guardrails rejected the auto-reply: the pipeline downgrades the lead to sensitive and keeps
+# the rejected text as a staff draft next to the acknowledgment (router.downgrade_failed_auto_reply).
+def test_downgraded_routine_lead_gets_acknowledgment_and_rejected_text_as_draft(session, make_intake):
+    c = classification()
+    decision = downgrade_failed_auto_reply(decide(c))
+    replies = (
+        GeneratedReply(Action.ACKNOWLEDGMENT, "Danke, wir melden uns.", None),
+        GeneratedReply(Action.DRAFT, "Abgelehnter Text", "Abgelehnter Text", ("too long",)),
+    )
+    intake, sender = make_intake(FakePipeline(PipelineResult(c, decision, replies, (), 0.01)))
+    lead_id = receive_and_process(intake)
+    repo = Repository(session)
+    lead = repo.get_lead(lead_id)
+    assert (lead.status, lead.risk, lead.needs_manual_review) == ("awaiting_approval", "routine", True)
+    ack, draft = repo.replies_for(lead_id)
+    assert (ack.kind, ack.status, draft.kind, draft.status) == ("acknowledgment", "sent", "draft", "drafted")
+    assert [c["body"] for c in sender.calls] == ["Danke, wir melden uns."]
+
+
+# Route 4: routine, AUTO_REPLY_MODE=outside_hours and the practice is open. The patient gets the
+# fixed acknowledgment, staff get an AI draft to review; the lead is not flagged.
+def test_routine_lead_in_opening_hours_mode_gets_acknowledgment_and_draft(session, make_intake):
+    c = classification()
+    decision = decide(c, auto_reply_mode="outside_hours", practice_open=True)
+    replies = (
+        GeneratedReply(Action.ACKNOWLEDGMENT, "Danke, wir melden uns.", None),
+        GeneratedReply(Action.DRAFT, "Entwurf", "Entwurf"),
+    )
+    intake, sender = make_intake(FakePipeline(PipelineResult(c, decision, replies, (), 0.01)))
+    lead_id = receive_and_process(intake)
+    repo = Repository(session)
+    lead = repo.get_lead(lead_id)
+    assert (lead.status, lead.needs_manual_review) == ("awaiting_approval", False)
+    ack, draft = repo.replies_for(lead_id)
+    assert (ack.kind, ack.status, draft.kind, draft.status) == ("acknowledgment", "sent", "draft", "drafted")
+    assert len(sender.calls) == 1
+
+
+# Fix round 1: a first reply committed by acknowledge_lead must still be sent when a later write
+# fails AND the anonymized check fails too (database down): otherwise it would sit "drafted" with
+# nobody sending it. Exactly one email, the lead flagged, process() does not raise.
+def test_first_reply_is_still_sent_when_a_later_write_and_the_anonymized_check_fail(session, make_intake, monkeypatch):
+    def down(*args, **kwargs):
+        raise OperationalError("database", {}, Exception("database down"))
+
+    monkeypatch.setattr(Repository, "add_reply", down)  # the draft write after acknowledge_lead
+    monkeypatch.setattr(IntakeService, "_anonymized", down)
+    intake, sender = make_intake(FakePipeline(sensitive_result()))
+    lead_id = receive_and_process(intake)
+    repo = Repository(session)
+    [ack] = repo.replies_for(lead_id)
+    assert (ack.kind, ack.status) == ("acknowledgment", "sent")
+    assert [c["body"] for c in sender.calls] == ["Danke, wir melden uns. 112"]
+    assert repo.get_lead(lead_id).needs_manual_review is True
+
+
 def test_duplicate_returns_none_and_sends_nothing(session, make_intake):
     pipeline = FakePipeline(routine_result())
     intake, sender = make_intake(pipeline)
@@ -339,7 +395,7 @@ def test_pipeline_over_deadline_sends_fallback_and_late_result_writes_nothing(se
     lead_id = receive_and_process(intake)
     waited = time.monotonic() - started
     assert_fallback_only(session, lead_id, sender, practice)
-    assert waited < 0.5  # did not wait for the slow run
+    assert waited < pipeline.delay  # did not wait for the slow run
     assert pipeline.finished.wait(2)
     wait_for_free_slots(intake)
     assert_fallback_only(session, lead_id, sender, practice)

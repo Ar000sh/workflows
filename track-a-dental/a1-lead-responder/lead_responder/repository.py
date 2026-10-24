@@ -440,6 +440,26 @@ class Repository:
             .order_by(Lead.id)
         )
 
+    # Sweep part 1b: first replies (acknowledgment, auto-reply) still "drafted", created before
+    # `created_before` (strictly), of a lead that is not anonymized. They were committed by
+    # acknowledge_lead but never claimed (the writer crashed or the database failed before the
+    # send), and part 2 skips their leads because a first reply exists. Never kind "draft": a staff
+    # draft waits for approval. A plain read, no lock: the sweep sends each through send(), whose
+    # claim lets one sweep win.
+    def stale_drafted_first_replies(self, *, created_before: datetime) -> list[Reply]:
+        _require_aware("created_before", created_before)
+        return self._read_all(
+            select(Reply)
+            .join(Lead, Lead.id == Reply.lead_id)
+            .where(
+                Reply.kind.in_([k.value for k in FIRST_REPLY_KINDS]),
+                Reply.status == ReplyStatus.DRAFTED.value,
+                Reply.created_at < created_before,
+                Lead.anonymized_at.is_(None),
+            )
+            .order_by(Reply.id)
+        )
+
     # DSGVO retention: blank the personal data of every lead created BEFORE `cutoff` (strictly:
     # a lead exactly at the cutoff stays) that is not anonymized yet. Reply texts, reply errors
     # (they may hold a recipient address), the dedup_key hash, the mailbox_key (the normalized

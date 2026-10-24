@@ -136,3 +136,36 @@ def test_leads_without_first_reply_skips_suppressed_replied_and_young_leads(sess
         lost_new.id, lost_classified.id, lost_acknowledged.id, with_draft_only.id,
     ]
     assert anonymized.id not in [ld.id for ld in found]
+
+
+# --- sweep part 1b: first replies written but never claimed ---
+
+# Acknowledgments and auto-replies still "drafted" and created strictly before the cutoff (a reply
+# exactly at the cutoff waits for the next sweep, as in part 2). Never a staff draft (those wait
+# for approval), never a reply already claimed or sent, never one of an anonymized lead.
+def test_stale_drafted_first_replies_filters_kind_status_age_and_anonymized(session):
+    repo = Repository(session)
+    old = NOW - timedelta(minutes=6)
+    cutoff = NOW - timedelta(minutes=5)
+
+    def first_reply(name, kind=Action.ACKNOWLEDGMENT, now=old):
+        lead = make_lead(repo, email=f"{name}@example.com", now=now)
+        if kind is Action.AUTO_REPLY:
+            repo.set_lead_status(lead.id, LeadStatus.CLASSIFIED)
+        return repo.acknowledge_lead(lead.id, kind=kind, ai_body=None, body="x", now=now)
+
+    stale_ack = first_reply("ack")
+    stale_auto = first_reply("auto", kind=Action.AUTO_REPLY)
+    first_reply("young", now=NOW - timedelta(minutes=4))
+    first_reply("edge", now=cutoff)
+    claimed = first_reply("claimed")
+    repo.set_reply_status(claimed.id, ReplyStatus.SENDING, now=old)
+    staff = make_lead(repo, email="staff@example.com", now=old)
+    repo.add_reply(staff.id, kind=Action.DRAFT, ai_body=None, body="x", status=ReplyStatus.DRAFTED, now=old)
+    anonymized_lead = make_lead(repo, email="anon@example.com", now=NOW - timedelta(days=100))
+    repo.acknowledge_lead(anonymized_lead.id, kind=Action.ACKNOWLEDGMENT, ai_body=None, body="x", now=NOW - timedelta(days=100))
+    repo.anonymize_older_than(cutoff=NOW - timedelta(days=90), now=NOW)
+
+    found = repo.stale_drafted_first_replies(created_before=cutoff)
+    assert not session.in_transaction()
+    assert [r.id for r in found] == [stale_ack.id, stale_auto.id]

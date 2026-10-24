@@ -116,15 +116,18 @@ class IntakeService:
                 # Discard: another writer (the sweep, a fallback) got to the lead first.
                 log.info("lead %s: result discarded, lead already moved on", lead_id)
             except Exception as e:
-                if self._anonymized(lead_id):
+                if self._known_anonymized(lead_id):
                     # Discard: retention blanked the lead during the run; its result is personal data.
                     log.info("lead %s: result discarded, lead anonymized", lead_id)
                 else:
                     log.error("lead %s: writing the result failed (%s)", lead_id, type(e).__name__)
                     self._fallback(lead_id)
-            # A first reply this run wrote is sent even if a later write failed: the claim makes a
-            # second send attempt harmless, and the patient must not be left without the email.
-            self._send(lead_id, first_replies)
+            finally:
+                # A first reply this run committed is ALWAYS sent, whatever failed after it: it is
+                # a "drafted" row nobody else would send soon (the sweep only picks it up after
+                # NO_REPLY_SWEEP_MINUTES). The claim makes a second attempt harmless, send()
+                # refuses an anonymized lead, and _send never raises.
+                self._send(lead_id, first_replies)
         except Exception as e:
             log.error("lead %s: processing failed (%s)", lead_id, type(e).__name__)
 
@@ -235,6 +238,16 @@ class IntakeService:
                 Repository(session).flag_for_review(lead_id)
         except Exception as e:
             log.error("lead %s: flagging for review failed (%s)", lead_id, type(e).__name__)
+
+    # True if retention anonymized the lead. If the check itself fails (database down) the answer
+    # is False: the caller then tries the fallback and the send, which refuse an anonymized lead
+    # themselves, rather than dropping a reply on an unanswered question.
+    def _known_anonymized(self, lead_id: int) -> bool:
+        try:
+            return self._anonymized(lead_id)
+        except Exception as e:
+            log.error("lead %s: anonymized check failed (%s)", lead_id, type(e).__name__)
+            return False
 
     def _anonymized(self, lead_id: int) -> bool:
         with self._session_factory() as session:

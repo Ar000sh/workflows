@@ -2,7 +2,8 @@
 
 The rule under test: the sweep resends only ACKNOWLEDGMENTS stuck in "sending" longer than
 SENDING_TIMEOUT_MINUTES (10) and below MAX_SEND_ATTEMPTS (3); drafts and auto-replies in "sending"
-are never touched. Leads older than NO_REPLY_SWEEP_MINUTES (5) with no first reply and not
+are never touched. Acknowledgments and auto-replies left "drafted" (written, never claimed) for
+longer than NO_REPLY_SWEEP_MINUTES are sent once; staff drafts never. Leads older than NO_REPLY_SWEEP_MINUTES (5) with no first reply and not
 suppressed get the route-1 fallback acknowledgment. Two sweeps at once still send one email per
 reply and per lead, and a second sweep after the first changes nothing.
 A fake Sender stands in for SMTP; the clock is fixed at NOW so the ages are exact.
@@ -278,3 +279,105 @@ def test_sweep_skips_anonymized_leads(session, engine, practice):
     assert sender.calls == []
     assert repo.get_reply(reply.id).status == "failed"
     assert repo.replies_for(lead.id) == []
+
+
+# --- part 1b: first replies written but never claimed (the writer died before the send) ---
+
+STALE = timedelta(minutes=6)  # older than NO_REPLY_SWEEP_MINUTES (5)
+
+
+# A first reply committed by acknowledge_lead `age` before NOW and never claimed: still "drafted".
+def drafted_first_reply(repo: Repository, kind=Action.ACKNOWLEDGMENT, email=EMAIL, age=STALE):
+    lead = make_lead(repo, email)
+    if kind is Action.AUTO_REPLY:
+        repo.set_lead_status(lead.id, LeadStatus.CLASSIFIED)
+    return lead, repo.acknowledge_lead(lead.id, kind=kind, ai_body=None, body="Danke, wir melden uns.", now=NOW - age)
+
+
+def test_stale_drafted_acknowledgment_is_sent_once(session, engine, practice):
+    repo = Repository(session)
+    lead, reply = drafted_first_reply(repo)
+    sender = FakeSender()
+    service = make_service(engine, practice, sender)
+    assert service.sweep() == SweepResult(0, 0, 0, 1)
+    assert service.sweep() == SweepResult(0, 0, 0, 0)
+    assert repo.get_reply(reply.id).status == "sent"
+    assert [c["to"] for c in sender.calls] == [EMAIL]
+
+
+# send() also fixes the lead: a sent auto-reply makes it "auto_replied".
+def test_stale_drafted_auto_reply_is_sent(session, engine, practice):
+    repo = Repository(session)
+    lead, reply = drafted_first_reply(repo, kind=Action.AUTO_REPLY)
+    sender = FakeSender()
+    assert make_service(engine, practice, sender).sweep() == SweepResult(0, 0, 0, 1)
+    assert repo.get_reply(reply.id).status == "sent"
+    assert repo.get_lead(lead.id).status == "auto_replied"
+
+
+# Younger than the cutoff, or exactly at it (strict <): the original writer may still be sending.
+def test_young_drafted_first_reply_is_not_touched(session, engine, practice):
+    repo = Repository(session)
+    _, young = drafted_first_reply(repo, age=timedelta(minutes=4))
+    _, edge = drafted_first_reply(repo, email=OTHER, age=timedelta(minutes=5))
+    sender = FakeSender()
+    assert make_service(engine, practice, sender).sweep() == SweepResult(0, 0, 0, 0)
+    assert sender.calls == []
+    assert {repo.get_reply(young.id).status, repo.get_reply(edge.id).status} == {"drafted"}
+
+
+# A staff draft waits for approval, however old: the sweep never sends it.
+def test_stale_staff_draft_is_never_sent(session, engine, practice):
+    repo = Repository(session)
+    lead = make_lead(repo)
+    repo.add_reply(lead.id, kind=Action.ACKNOWLEDGMENT, ai_body=None, body="Danke", status=ReplyStatus.SENT, now=NOW - STALE)
+    draft = repo.add_reply(lead.id, kind=Action.DRAFT, ai_body=None, body="Entwurf", status=ReplyStatus.DRAFTED, now=NOW - STALE)
+    sender = FakeSender()
+    assert make_service(engine, practice, sender).sweep() == SweepResult(0, 0, 0, 0)
+    assert sender.calls == []
+    assert repo.get_reply(draft.id).status == "drafted"
+
+
+# Both sweeps read the stale reply before either sends it; the claim lets one of them send.
+def test_two_overlapping_sweeps_send_one_stale_drafted_reply_once(session, engine, practice, monkeypatch):
+    repo = Repository(session)
+    _, reply = drafted_first_reply(repo)
+    read_both = threading.Barrier(2, timeout=10)
+    original = Repository.stale_drafted_first_replies
+
+    def read_then_wait(self, **kwargs):
+        rows = original(self, **kwargs)
+        read_both.wait()
+        return rows
+
+    monkeypatch.setattr(Repository, "stale_drafted_first_replies", read_then_wait)
+    sender = FakeSender(delay=0.2)
+    service = make_service(engine, practice, sender)
+    results, errors = [], []
+
+    def worker():
+        try:
+            results.append(service.sweep())
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    monkeypatch.undo()
+    assert errors == []
+    assert len(sender.calls) == 1
+    assert sum(r.sent_stale_drafted for r in results) == 1
+    assert repo.get_reply(reply.id).send_attempts == 1
+
+
+def test_stale_drafted_reply_of_anonymized_lead_is_skipped(session, engine, practice):
+    repo = Repository(session)
+    _, reply = drafted_first_reply(repo)
+    repo.anonymize_older_than(cutoff=NOW + timedelta(days=1), now=NOW)
+    sender = FakeSender()
+    assert make_service(engine, practice, sender).sweep() == SweepResult(0, 0, 0, 0)
+    assert sender.calls == []
+    assert repo.get_reply(reply.id).status == "drafted"

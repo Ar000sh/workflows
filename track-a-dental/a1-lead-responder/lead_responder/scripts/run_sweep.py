@@ -1,4 +1,5 @@
-"""Scheduled job: resend stuck acknowledgments and acknowledge leads that got no reply.
+"""Scheduled job: resend stuck acknowledgments, send first replies that were written but never
+sent, and acknowledge leads that got no reply.
 
 Run:  uv run python -m lead_responder.scripts.run_sweep
 Meant to run every few minutes from a scheduler (chosen with the deployment layer). Safe to run
@@ -18,7 +19,7 @@ from lead_responder.services.replies import ReplyService  # noqa: E402
 
 
 # Wires the real pieces (Postgres, SMTP from config, the practice file) into one ReplyService,
-# runs one sweep and prints its three counts. MAIL_FROM empty means the practice sends as itself;
+# runs one sweep and prints its four counts. MAIL_FROM empty means the practice sends as itself;
 # replies from patients go to the practice address either way.
 def main() -> int:
     practice = load_practice()
@@ -34,6 +35,7 @@ def main() -> int:
     result = service.sweep()
     print(
         f"Retried {result.retried_acknowledgments} stuck acknowledgment(s), sent "
+        f"{result.sent_stale_drafted} unsent first reply(ies), sent "
         f"{result.fallback_acknowledgments} fallback acknowledgment(s), left "
         f"{result.left_for_staff} for staff."
     )

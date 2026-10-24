@@ -69,7 +69,7 @@ Tariq's = decided by Tariq (in the A1 review or the 4b brainstorm 2026-10-24). M
                           ▼
                     set_reply_status(SENT | FAILED | stays SENDING on timeout)
 
- scheduler ──► scripts/run_sweep.py ──► ReplyService.sweep()  (stuck acknowledgments, leads with no reply)
+ scheduler ──► scripts/run_sweep.py ──► ReplyService.sweep()  (stuck acknowledgments, unsent first replies, leads with no reply)
 ```
 
 | Unit | Responsibility | Depends on |
@@ -78,9 +78,9 @@ Tariq's = decided by Tariq (in the A1 review or the 4b brainstorm 2026-10-24). M
 | `api/schemas.py` | `LeadIn`: required consent, email format, size caps, NUL stripping, name cleaning. Produces cleaned text; `dedup_key` is computed on cleaned text | `limits` |
 | `api/app.py` | `POST /leads` (answers fast, hides duplicates), `GET /health`; body-size limit before parsing (`413`); session per request via `make_session_factory`; CORS allowlist from config; error answers never show internals | services |
 | `services/intake.py` | Duplicate decision, rate limits (normalized mailbox key), concurrency cap on pipelines, running the pipeline under the deadline, writing results, choosing lead status, the fallback acknowledgment (route 1) | repository, pipeline, `ReplyService` |
-| `services/replies.py` | `send(reply_id)`: refuse an anonymized lead, claim, call the sender, record the result; `sweep()`: retry stuck acknowledgments up to the cap, give leads with no reply the fallback acknowledgment | repository, sender |
+| `services/replies.py` | `send(reply_id)`: refuse an anonymized lead, claim, call the sender, record the result; `sweep()`: retry stuck acknowledgments up to the cap, send first replies left `drafted`, give leads with no reply the fallback acknowledgment | repository, sender |
 | `sender.py` | `Sender` Protocol, `SendResult` (`ACCEPTED`, `FAILED`, `TIMEOUT`), `SmtpSender` with retry policy (A1 section 7: up to 3 retries with backoff on a refused or unreachable provider, none after a timeout) | smtplib, config |
-| `repository.py` | Loses its input rules (table below); gains `acknowledge_lead` (status move + acknowledgment reply in one transaction), conditional `set_classification`, `claim` through the extended transition tables, plus queries for the sweep (stuck `sending`, leads with no reply, recent-lead counts) | Postgres |
+| `repository.py` | Loses its input rules (table below); gains `acknowledge_lead` (status move + acknowledgment reply in one transaction), conditional `set_classification`, `claim` through the extended transition tables, plus queries for the sweep (stuck `sending`, first replies left `drafted`, leads with no reply, recent-lead counts) | Postgres |
 | `scripts/run_sweep.py` | The unit a scheduler runs; same shape as `run_retention.py` | `ReplyService` |
 
 **Where each rule lives after 4b**
@@ -119,7 +119,7 @@ drafted ──► approved ──► sending ──► sent (final)
 
 **Sending (`ReplyService.send`)**: refuse if the lead is anonymized or has no email; claim `-> sending` (set `claimed_at`, `send_attempts + 1`); on `InvalidTransition` someone else won, do nothing and report "already handled"; call the sender; record `sent` (with `sent_at`) or `failed` (with `error`); on `TIMEOUT` leave it in `sending`.
 
-**Sweep (`ReplyService.sweep`, scheduled every few minutes)**: (1) acknowledgments in `sending` with `claimed_at` older than `SENDING_TIMEOUT` (default 10 min) and `send_attempts` below `MAX_SEND_ATTEMPTS` (default 3): move `sending -> failed`, then claim and send again; at the cap they stay for staff. Drafts and auto-replies in `sending` are never touched. (2) Leads in `new`, `classified` or `acknowledged` older than 5 minutes with no reply and not `send_suppressed`: send the route-1 acknowledgment through `acknowledge_lead` (a lead already past `new` or `classified` keeps its status; the method's conditional move is what stops two sweeps from both acting) and flag them.
+**Sweep (`ReplyService.sweep`, scheduled every few minutes)**: (1) acknowledgments in `sending` with `claimed_at` older than `SENDING_TIMEOUT` (default 10 min) and `send_attempts` below `MAX_SEND_ATTEMPTS` (default 3): move `sending -> failed`, then claim and send again; at the cap they stay for staff. Drafts and auto-replies in `sending` are never touched. (1b) Acknowledgments and auto-replies still `drafted` (written by `acknowledge_lead`, never claimed: the writer died or the database failed before the send) and created more than `NO_REPLY_SWEEP_MINUTES` ago (strictly), lead not anonymized: `send` them; the claim stops two sweeps from both sending. Staff drafts (kind `draft`) are never sent by the sweep. (2) Leads in `new`, `classified` or `acknowledged` older than 5 minutes with no reply and not `send_suppressed`: send the route-1 acknowledgment through `acknowledge_lead` (a lead already past `new` or `classified` keeps its status; the method's conditional move is what stops two sweeps from both acting) and flag them.
 
 **Retention** is unchanged. No new personal data is stored (no IPs, no new text columns).
 
@@ -133,6 +133,7 @@ drafted ──► approved ──► sending ──► sent (final)
 | Send times out | Reply stays `sending` (outcome unknown). Acknowledgment: sweep retries after `SENDING_TIMEOUT`, up to the cap. Draft or auto-reply: waits for staff |
 | Process dies mid-send | Same as a timeout: the reply is in `sending` |
 | Process dies after saving the lead | Sweep part 2 sends the route-1 acknowledgment |
+| Process dies (or the database fails) after the first reply is written but before its claim | Intake still tries the send in that run; otherwise sweep part 1b sends the `drafted` reply after `NO_REPLY_SWEEP_MINUTES` |
 | Two workers or two clicks try to send | One claim wins; the other gets `InvalidTransition` and does not send |
 | Lead anonymized before the send | No send; reply moves to `failed` (no error text kept) |
 | Over the per-email limit | Lead saved, `send_suppressed`, flagged, `acknowledged`, no email, no AI; staff see it in the queue; the sweep skips it |

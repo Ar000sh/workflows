@@ -19,6 +19,9 @@ sweep() is the scheduled clean-up (spec section 6 "Sweep", run by scripts/run_sw
   1. acknowledgments stuck in "sending" (claimed over SENDING_TIMEOUT_MINUTES ago): sending ->
      failed, then send() again, up to MAX_SEND_ATTEMPTS claims; at the cap they wait for staff.
      Drafts and auto-replies in "sending" are never resent: a duplicate medical reply is not harmless
+  1b. acknowledgments and auto-replies still "drafted" (written, never claimed: the writer died
+     or the database failed before the send) and older than NO_REPLY_SWEEP_MINUTES: send() them.
+     Never a staff draft (kind "draft"): it waits for approval
   2. leads older than NO_REPLY_SWEEP_MINUTES with no first reply: the fallback acknowledgment
 """
 from __future__ import annotations
@@ -77,6 +80,7 @@ class SweepResult:
     retried_acknowledgments: int   # stuck acknowledgments this sweep resent (whatever the new outcome)
     fallback_acknowledgments: int  # leads that got the fallback acknowledgment from this sweep
     left_for_staff: int            # stuck acknowledgments at MAX_SEND_ATTEMPTS, not resent
+    sent_stale_drafted: int = 0    # first replies left "drafted" (never claimed) that this sweep sent
 
 
 # True when the lead has no address to write to: retention blanked it (DSGVO) or it is empty.
@@ -132,7 +136,9 @@ class ReplyService:
 
     # The scheduled clean-up (module docstring). Safe to run twice in a row (the second run finds
     # nothing) and twice at once: every action goes through a conditional write that one sweep
-    # wins, fail_stuck_reply and the claim for part 1, acknowledge_lead's lock for part 2. A lead
+    # wins, fail_stuck_reply and the claim for part 1, the claim for part 1b, acknowledge_lead's
+    # lock for part 2. Part 1b runs before part 2 and uses the same age, so a lead whose first
+    # reply was written but never sent is picked up here (part 2 skips it: a first reply exists). A lead
     # anonymized between the read and the action is skipped (send refuses it, acknowledge_lead
     # raises ValueError). The reads hold no lock and no transaction while emails go out.
     def sweep(self) -> SweepResult:
@@ -146,13 +152,23 @@ class ReplyService:
             retry = [r.id for r in stuck if r.send_attempts < config.MAX_SEND_ATTEMPTS]
             left_for_staff = len(stuck) - len(retry)
             retried = sum(self._retry_stuck(repo, reply_id, stuck_before) for reply_id in retry)
-            leads = repo.leads_without_first_reply(
-                created_before=now - timedelta(minutes=config.NO_REPLY_SWEEP_MINUTES),
-            )
+            no_reply_before = now - timedelta(minutes=config.NO_REPLY_SWEEP_MINUTES)
+            stale_ids = [r.id for r in repo.stale_drafted_first_replies(created_before=no_reply_before)]
+            leads = repo.leads_without_first_reply(created_before=no_reply_before)
             lead_ids = [lead.id for lead in leads]
+        sent_stale = sum(self._send_stale(reply_id) for reply_id in stale_ids)
         fallbacks = sum(self._fallback(lead_id) for lead_id in lead_ids)
-        log.info("sweep: %s retried, %s fallback, %s left for staff", retried, fallbacks, left_for_staff)
-        return SweepResult(retried, fallbacks, left_for_staff)
+        log.info(
+            "sweep: %s retried, %s stale drafted sent, %s fallback, %s left for staff",
+            retried, sent_stale, fallbacks, left_for_staff,
+        )
+        return SweepResult(retried, fallbacks, left_for_staff, sent_stale)
+
+    # Part 1b for one reply: send() claims it, so of two sweeps only one sends (the other gets
+    # ALREADY_HANDLED). True if an email was attempted.
+    def _send_stale(self, reply_id: int) -> bool:
+        outcome = self.send(reply_id)
+        return outcome in (SendOutcome.SENT, SendOutcome.FAILED, SendOutcome.IN_DOUBT)
 
     # Part 1 for one reply: give up the stale claim (InvalidTransition = another sweep or a late
     # result got there first: skip), then send() claims it again. True if an email was attempted.
