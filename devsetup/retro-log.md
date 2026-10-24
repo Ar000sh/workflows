@@ -10,7 +10,7 @@
 | 1 | A new lock needs a two-session test; strength must match the next write; locking changes after review get an attack pass | CLAUDE.md rule "Shared data, two actors" | Tariq merged findings 1 and 2 (rule instead of a separate checklist) |
 | 2 | Stateful-code checklist in `safety-patterns.md` | dropped | Covered by 1 |
 | 3 | Concurrency variant of the attacker brief | dropped | The brief used on 2026-10-24 is in the conversation; revisit if the rule gets used |
-| 4 | One layer per rule | spec template section 5 | Tariq's correction: business rules and the transaction belong in a service, the repository is database access only; recorded in the A1 REVIEW.md as a 4b decision |
+| 4 | One layer per rule | spec template section 5 | Tariq's correction: business rules belong in a service, the repository is database access. Where the commit lives is a choice (my first wording claimed the service); Tariq chose to keep it in the repository, as in 4a |
 | 5 | Comment style | CLAUDE.md, reworded existing rule | Short, why not history, one line per index/constraint, every lock says which and why |
 | 6 | Review starts with an overview | CLAUDE.md, REVIEW.md rule | |
 | 7 | Decisions made in chat not in PROJECT.md | waiting | Tariq asked for an explanation first |
