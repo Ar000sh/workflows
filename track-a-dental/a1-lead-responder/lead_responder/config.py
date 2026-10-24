@@ -17,3 +17,13 @@ MAX_MESSAGE_CHARS = 5000
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql+psycopg://leads:leads@localhost:5433/leads")
 DATABASE_URL_TEST = os.environ.get("DATABASE_URL_TEST", "postgresql+psycopg://leads:leads@localhost:5433/leads_test")
 RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "90"))  # DSGVO: personal fields are blanked after this many days
+
+# Layer 4b: outgoing mail. The defaults point at Mailpit from docker-compose.yml (no TLS, no login);
+# a real provider sets host, port, STARTTLS and credentials. MAIL_FROM empty = the practice email.
+SMTP_HOST = os.environ.get("SMTP_HOST", "localhost")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "1025"))
+SMTP_STARTTLS = os.environ.get("SMTP_STARTTLS", "false").strip().lower() in ("1", "true", "yes")
+SMTP_USER = os.environ.get("SMTP_USER") or None
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD") or None
+SMTP_TIMEOUT_SECONDS = float(os.environ.get("SMTP_TIMEOUT_SECONDS", "10"))
+MAIL_FROM = os.environ.get("MAIL_FROM", "")
