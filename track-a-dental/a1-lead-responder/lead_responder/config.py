@@ -46,3 +46,9 @@ PIPELINE_DEADLINE_SECONDS = float(os.environ.get("PIPELINE_DEADLINE_SECONDS", "4
 SENDING_TIMEOUT_MINUTES = int(os.environ.get("SENDING_TIMEOUT_MINUTES", "10"))
 MAX_SEND_ATTEMPTS = int(os.environ.get("MAX_SEND_ATTEMPTS", "3"))
 NO_REPLY_SWEEP_MINUTES = int(os.environ.get("NO_REPLY_SWEEP_MINUTES", "5"))
+
+# Layer 4b: the HTTP API (api/app.py). A request body larger than MAX_BODY_BYTES is refused with 413
+# before it is parsed. CORS_ORIGINS is a comma list of website origins allowed to post from a
+# browser; empty (the default) allows none, which is right when the form is posted by a server.
+MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", "32768"))
+CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
