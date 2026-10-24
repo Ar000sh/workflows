@@ -1,15 +1,16 @@
 """Leads repository tests: duplicate detection, hostile text, validation, status updates."""
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from lead_responder.db.models import Lead, LeadStatus, ReplyStatus
 from lead_responder.models import Category, Classification, Risk, Urgency
-from lead_responder.repository import Repository, _dedup_key, _lock_id
+from lead_responder.repository import InvalidTransition, Repository, _dedup_key, _lock_id
 from lead_responder.router import Action, Decision
 
 NOW = datetime(2026, 10, 23, 10, 0, tzinfo=UTC)
@@ -239,6 +240,48 @@ def test_set_lead_status_updates_and_persists(session):
     assert session.get(Lead, lead.id).status == "classified"
 
 
+def walk(repo, lead_id, *statuses):
+    for status in statuses:
+        repo.set_lead_status(lead_id, status)
+
+
+# The two paths of the spec's lead status flow (section 5), step by step.
+def test_lead_status_follows_both_spec_paths(session):
+    repo = Repository(session)
+    routine, _ = repo.create_lead_if_new(**payload())
+    walk(repo, routine.id, LeadStatus.CLASSIFIED, LeadStatus.AUTO_REPLIED, LeadStatus.DONE)
+    sensitive, _ = repo.create_lead_if_new(**payload(email="ben@example.com"))
+    walk(
+        repo, sensitive.id, LeadStatus.CLASSIFIED, LeadStatus.ACKNOWLEDGED,
+        LeadStatus.AWAITING_APPROVAL, LeadStatus.REPLIED, LeadStatus.DONE,
+    )
+    assert sensitive.status == "done"
+
+
+def test_lead_status_refuses_skips_and_going_back(session):
+    repo = Repository(session)
+    lead, _ = repo.create_lead_if_new(**payload())
+    with pytest.raises(InvalidTransition):
+        repo.set_lead_status(lead.id, LeadStatus.DONE)  # new -> done skips everything
+    walk(repo, lead.id, LeadStatus.CLASSIFIED, LeadStatus.AUTO_REPLIED, LeadStatus.DONE)
+    for status in LeadStatus:
+        with pytest.raises(InvalidTransition):
+            repo.set_lead_status(lead.id, status)  # done is final, even to itself
+    assert session.get(Lead, lead.id).status == "done"
+
+
+def test_lead_status_move_by_a_stale_session_is_refused(engine, session):
+    repo = Repository(session)
+    lead, _ = repo.create_lead_if_new(**payload())
+    repo.set_lead_status(lead.id, LeadStatus.CLASSIFIED)
+    with Session(engine, expire_on_commit=False) as other:
+        assert other.get(Lead, lead.id).status == "classified"  # the other session's cached view
+        walk(repo, lead.id, LeadStatus.ACKNOWLEDGED)
+        with pytest.raises(InvalidTransition):
+            # classified -> auto_replied was allowed in the stale view, not any more
+            Repository(other).set_lead_status(lead.id, LeadStatus.AUTO_REPLIED)
+
+
 def test_set_lead_status_rejects_a_plain_string(session):
     repo = Repository(session)
     lead, _ = repo.create_lead_if_new(**payload())
@@ -315,3 +358,103 @@ def test_anonymized_lead_refuses_classification_and_new_replies(session):
     # the session is still usable and nothing was written
     assert repo.replies_for(lead.id) == []
     assert repo.get_lead(lead.id).ai_reason is None
+
+
+# --- Found by the concurrency attack probe (2026-10-24) ---
+
+def _cls() -> Classification:
+    return Classification(
+        category=Category.APPOINTMENT, risk=Risk.ROUTINE, urgency=Urgency.NORMAL,
+        language="de", reason="x",
+    )
+
+
+# set_classification used to take a SHARE lock and then UPDATE the same row: two sessions that both
+# hold a share lock each wait for the other to let go before they can update = deadlock.
+# Deterministic version: another session holds a share lock and then updates the lead.
+def test_set_classification_does_not_deadlock_with_a_share_lock_holder(engine, session):
+    lead, _ = Repository(session).create_lead_if_new(**payload())
+    other = Session(engine)
+    other.execute(select(Lead.id).where(Lead.id == lead.id).with_for_update(read=True))
+    results = {}
+
+    def worker():
+        with Session(engine, expire_on_commit=False) as s:
+            try:
+                Repository(s).set_classification(lead.id, classification=_cls(), decision=_decision())
+                results["worker"] = "ok"
+            except Exception as e:  # noqa: BLE001
+                results["worker"] = type(e).__name__
+
+    t = threading.Thread(target=worker)
+    t.start()
+    time.sleep(0.5)  # the worker is now waiting on (or holding) its lock
+    try:
+        other.execute(update(Lead).where(Lead.id == lead.id).values(needs_manual_review=True))
+        other.commit()
+        results["other"] = "ok"
+    except Exception as e:  # noqa: BLE001
+        other.rollback()
+        results["other"] = type(e).__name__
+    finally:
+        other.close()
+    t.join(15)
+    assert results == {"worker": "ok", "other": "ok"}
+
+
+# The realistic version: a retried webhook or a re-queued lead classifies the same lead twice at once.
+def test_two_classifications_of_the_same_lead_at_once_both_succeed(engine, session):
+    repo = Repository(session)
+    for i in range(10):
+        lead, _ = repo.create_lead_if_new(**payload(email=f"p{i}@example.com"))
+        barrier = threading.Barrier(2)
+
+        def attempt(_, lead_id=lead.id, barrier=barrier):
+            with Session(engine, expire_on_commit=False) as s:
+                barrier.wait()
+                Repository(s).set_classification(lead_id, classification=_cls(), decision=_decision())
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(attempt, range(2)))  # raises if either call failed (e.g. a deadlock)
+
+
+# The read methods had no commit/rollback: a failed read left the Session's transaction broken, so the
+# next write failed with InFailedSqlTransaction, and a successful read left it "idle in transaction".
+def test_a_failed_read_does_not_break_the_next_write(session):
+    repo = Repository(session)
+    with pytest.raises(Exception):  # noqa: B017  (a wrong-type id: the database rejects it)
+        repo.replies_for("abc")
+    with pytest.raises(Exception):  # noqa: B017
+        repo.get_lead("abc")
+    lead, created = repo.create_lead_if_new(**payload())
+    assert created is True and lead.id is not None
+
+
+def test_reads_do_not_leave_a_transaction_open(session):
+    repo = Repository(session)
+    lead, _ = repo.create_lead_if_new(**payload())
+    repo.get_lead(lead.id)
+    assert not session.in_transaction()
+    repo.replies_for(lead.id)
+    assert not session.in_transaction()
+
+
+# A long-lived Session (expire_on_commit=False) kept answering from its cache after another session
+# rejected a reply and ran retention: it would show patient data the database has already erased.
+def test_reads_see_what_another_session_changed(engine, session):
+    repo = Repository(session)
+    lead, _ = repo.create_lead_if_new(**payload())
+    reply = repo.add_reply(
+        lead.id, kind=Action.DRAFT, ai_body="x", body="Hallo Anna",
+        status=ReplyStatus.DRAFTED, now=NOW,
+    )
+    assert repo.get_lead(lead.id).anonymized_at is None  # now cached in this session
+    assert repo.replies_for(lead.id)[0].status == "drafted"
+    with Session(engine, expire_on_commit=False) as other:
+        other_repo = Repository(other)
+        other_repo.set_reply_status(reply.id, ReplyStatus.REJECTED, now=NOW)
+        other_repo.anonymize_older_than(cutoff=NOW + timedelta(days=1), now=NOW + timedelta(days=2))
+    got = repo.get_lead(lead.id)
+    assert got.anonymized_at is not None and got.name == "[anonymized]"
+    only = repo.replies_for(lead.id)[0]
+    assert only.status == "rejected" and only.body == "[anonymized]"

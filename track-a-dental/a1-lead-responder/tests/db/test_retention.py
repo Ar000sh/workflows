@@ -1,8 +1,12 @@
 """Retention (DSGVO) tests: personal data blanked, statistics kept, exact boundary, idempotent."""
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
 
 from lead_responder import retention
 from lead_responder.db.models import AuditLog, Lead, LeadStatus, Reply, ReplyStatus
@@ -22,10 +26,10 @@ def make_lead(repo: Repository, created: datetime, email="anna@example.com", **k
     return lead
 
 
-def add_reply(repo: Repository, lead_id: int, n: int = 1):
+def add_reply(repo: Repository, lead_id: int, n: int = 1, status: ReplyStatus = ReplyStatus.SENT):
     return repo.add_reply(
         lead_id, kind=Action.DRAFT, ai_body=f"AI text {n}", body=f"Edited text {n}",
-        status=ReplyStatus.SENT, now=NOW, edited=True,
+        status=status, now=NOW, edited=True,
     )
 
 
@@ -34,8 +38,8 @@ def test_personal_fields_are_blanked_and_statistics_kept(session):
     lead = make_lead(repo, CUTOFF - timedelta(days=1))
     lead.category, lead.risk, lead.urgency, lead.language = "appointment", "low", "normal", "de"
     lead.ai_reason = "Patient nennt Zahnschmerzen"  # free text about the patient: must go
+    lead.status = LeadStatus.REPLIED.value  # set directly: this test is about retention, not the flow
     session.commit()
-    repo.set_lead_status(lead.id, LeadStatus.REPLIED)
 
     assert repo.anonymize_older_than(cutoff=CUTOFF, now=NOW) == 1
 
@@ -53,7 +57,9 @@ def test_reply_texts_and_dedup_key_are_blanked_too(session):
     repo = Repository(session)
     lead = make_lead(repo, CUTOFF - timedelta(days=1))
     assert lead.dedup_key is not None
-    r1, r2 = add_reply(repo, lead.id, 1), add_reply(repo, lead.id, 2)
+    # Created as drafts: "sent" is final, so the failed-then-sent resends below start from "drafted".
+    r1 = add_reply(repo, lead.id, 1, ReplyStatus.DRAFTED)
+    r2 = add_reply(repo, lead.id, 2, ReplyStatus.DRAFTED)
     # a failed send may leave the recipient address in `error`
     repo.set_reply_status(r1.id, ReplyStatus.FAILED, now=NOW, error="550 rejected: anna@example.com")
     repo.set_reply_status(r1.id, ReplyStatus.SENT, now=NOW)
@@ -185,7 +191,7 @@ def test_retention_commits_once_per_batch(session):
     commits = []
     event.listen(session, "after_commit", lambda s: commits.append(1))
     repo.anonymize_older_than(cutoff=CUTOFF, now=NOW, batch_size=3)
-    assert len(commits) >= 3  # batches of 3, 3, 1 (plus the sweep)
+    assert len(commits) >= 3  # batches of 3, 3, 1 (plus the closing commit)
 
 
 def test_batch_size_must_be_positive(session):
@@ -193,40 +199,155 @@ def test_batch_size_must_be_positive(session):
         Repository(session).anonymize_older_than(cutoff=CUTOFF, now=NOW, batch_size=0)
 
 
-# F2 (a): personal data that re-enters an already anonymized lead (written around the guard)
-# is swept away on the next run, although the lead itself is not "newly anonymized".
-def test_sweep_blanks_leftovers_on_already_anonymized_leads(session):
+# --- Personal data must never land on an anonymized lead. There is no clean-up pass: the write
+# paths check under a lock (FOR SHARE) and refuse or drop the text. ---
+
+# What one retention batch does, left UNcommitted: lock the lead row (FOR UPDATE) and blank it.
+# Returns the open Session; the test commits it when it wants the batch to "finish".
+def start_retention_batch(engine, lead_id: int) -> Session:
+    batch = Session(engine)
+    batch.execute(select(Lead.id).where(Lead.id == lead_id).with_for_update())
+    batch.execute(update(Lead).where(Lead.id == lead_id).values(
+        name="[anonymized]", email="", message="", anonymized_at=NOW))
+    return batch
+
+
+# Runs `write(repo)` in another thread while the batch is still open. The thread must be BLOCKED
+# (waiting for the lock), then the batch commits and we return what the write did.
+def write_while_batch_is_open(engine, batch: Session, write) -> str:
+    outcome = {}
+
+    def worker():
+        with Session(engine, expire_on_commit=False) as s:
+            try:
+                write(Repository(s))
+                outcome["result"] = "stored"
+            except ValueError as e:
+                outcome["result"] = f"refused: {e}"
+
+    t = threading.Thread(target=worker)
+    t.start()
+    time.sleep(1.0)
+    assert t.is_alive(), "the write did not wait for the retention batch"
+    batch.commit()
+    batch.close()
+    t.join(10)
+    assert not t.is_alive()
+    return outcome["result"]
+
+
+# The race that a plain "is it anonymized?" read cannot see: the check must take a lock, so it
+# waits for the running batch and then sees the lead as anonymized.
+def test_add_reply_during_a_retention_batch_waits_then_refuses(engine, session):
     repo = Repository(session)
     lead = make_lead(repo, CUTOFF - timedelta(days=1))
-    assert repo.anonymize_older_than(cutoff=CUTOFF, now=NOW) == 1
-    # bypass the repository guard, as a bug or a raw SQL fix would
-    lead_row = session.get(Lead, lead.id)
-    lead_row.ai_reason = "Patient Anna hat Angst"
-    late = Reply(
-        lead_id=lead.id, kind="draft", ai_body="Dear Anna", body="Dear Anna",
-        status="failed", error="smtp rejected anna@example.com", created_at=NOW,
-    )
-    session.add(late)
-    session.commit()
+    batch = start_retention_batch(engine, lead.id)
 
-    assert repo.anonymize_older_than(cutoff=CUTOFF, now=NOW + timedelta(days=1)) == 0
+    result = write_while_batch_is_open(engine, batch, lambda r: r.add_reply(
+        lead.id, kind=Action.DRAFT, ai_body="x", body="Hallo Anna, bei Zahnschmerzen ...",
+        status=ReplyStatus.DRAFTED, now=NOW,
+    ))
 
+    assert result.startswith("refused")
     session.expire_all()
-    got = session.get(Lead, lead.id)
-    assert got.ai_reason is None
-    assert got.anonymized_at == NOW  # not moved
-    rep = session.get(Reply, late.id)
-    assert (rep.body, rep.ai_body, rep.error) == ("[anonymized]", None, None)
-    assert rep.status == "failed"  # statistics kept
+    assert session.scalars(select(Reply).where(Reply.lead_id == lead.id)).all() == []
 
 
-# set_reply_status stays allowed on an anonymized lead's reply; its error is swept next run.
-def test_set_reply_status_error_on_anonymized_lead_is_swept(session):
+def test_set_classification_during_a_retention_batch_waits_then_refuses(engine, session):
+    from lead_responder.models import Category, Classification, Risk, Urgency
+    from lead_responder.router import Decision
+
     repo = Repository(session)
     lead = make_lead(repo, CUTOFF - timedelta(days=1))
-    reply = add_reply(repo, lead.id)
+    batch = start_retention_batch(engine, lead.id)
+    decision = Decision(
+        risk=Risk.SENSITIVE, actions=(Action.DRAFT,), language="de", emergency=False,
+        language_unsupported=False, needs_manual_review=False,
+    )
+    cls = Classification(
+        category=Category.PAIN_EMERGENCY, risk=Risk.SENSITIVE, urgency=Urgency.HIGH,
+        language="de", reason="Patient Anna hat Angst",
+    )
+
+    result = write_while_batch_is_open(
+        engine, batch, lambda r: r.set_classification(lead.id, classification=cls, decision=decision),
+    )
+
+    assert result.startswith("refused")
+    session.expire_all()
+    assert session.get(Lead, lead.id).ai_reason is None
+
+
+# A failed send can carry the recipient address in `error`. For an anonymized lead the status still
+# moves (statistics), but the error text is dropped instead of stored.
+def test_error_text_is_not_stored_for_an_anonymized_lead(session):
+    repo = Repository(session)
+    lead = make_lead(repo, CUTOFF - timedelta(days=1))
+    reply = add_reply(repo, lead.id, status=ReplyStatus.DRAFTED)
     repo.anonymize_older_than(cutoff=CUTOFF, now=NOW)
-    repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="smtp rejected x@y.de")
-    repo.anonymize_older_than(cutoff=CUTOFF, now=NOW)
+
+    updated = repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="smtp rejected x@y.de")
+
+    assert updated.status == "failed"
     session.expire_all()
     assert session.get(Reply, reply.id).error is None
+
+
+def test_error_text_during_a_retention_batch_waits_then_is_dropped(engine, session):
+    repo = Repository(session)
+    lead = make_lead(repo, CUTOFF - timedelta(days=1))
+    reply = add_reply(repo, lead.id, status=ReplyStatus.DRAFTED)
+    batch = start_retention_batch(engine, lead.id)
+
+    write_while_batch_is_open(engine, batch, lambda r: r.set_reply_status(
+        reply.id, ReplyStatus.FAILED, now=NOW, error="smtp rejected anna@example.com",
+    ))
+
+    session.expire_all()
+    stored = session.get(Reply, reply.id)
+    assert stored.status == "failed"
+    assert stored.error is None
+
+
+# For a normal lead the error is stored as before.
+def test_error_text_is_stored_for_a_normal_lead(session):
+    repo = Repository(session)
+    lead = make_lead(repo, NOW - timedelta(days=1))
+    reply = add_reply(repo, lead.id, status=ReplyStatus.DRAFTED)
+    repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="timeout: may have been sent")
+    session.expire_all()
+    assert session.get(Reply, reply.id).error == "timeout: may have been sent"
+
+
+# Two retention jobs started at the same moment (an overlapping schedule, a manual run during the
+# nightly one). Each run uses its own `now`, so we can see WHICH run anonymized each lead:
+# every lead must be handled exactly once (counts add up, no timestamp overwritten by the other run).
+def test_two_retention_runs_at_once_handle_each_lead_exactly_once(engine, session):
+    repo = Repository(session)
+    for i in range(30):
+        add_reply(repo, make_lead(repo, CUTOFF - timedelta(days=1), email=f"p{i}@example.com").id)
+    barrier = threading.Barrier(2)
+    run_times = [NOW, NOW + timedelta(hours=1)]
+
+    def run(now):
+        with Session(engine, expire_on_commit=False) as s:
+            barrier.wait()
+            return Repository(s).anonymize_older_than(cutoff=CUTOFF, now=now, batch_size=4)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        counts = list(pool.map(run, run_times))
+
+    assert sum(counts) == 30
+    session.expire_all()
+    stamps = [lead.anonymized_at for lead in session.scalars(select(Lead))]
+    assert all(stamp in run_times for stamp in stamps)
+    assert stamps.count(run_times[0]) == counts[0]
+    assert stamps.count(run_times[1]) == counts[1]
+    assert all(r.body == "[anonymized]" for r in session.scalars(select(Reply)))
+
+
+# The ids of one batch go into a single IN (...) list; Postgres allows 65535 bind parameters in a
+# statement, so a bigger batch_size would crash EVERY run without anonymizing anything.
+def test_batch_size_above_the_bind_parameter_limit_is_rejected(session):
+    with pytest.raises(ValueError):
+        Repository(session).anonymize_older_than(cutoff=CUTOFF, now=NOW, batch_size=60_001)

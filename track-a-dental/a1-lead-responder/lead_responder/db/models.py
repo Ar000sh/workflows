@@ -34,6 +34,36 @@ class ReplyStatus(StrEnum):
     FAILED = "failed"
 
 
+# Which status may follow which: "key -> the statuses it may move to". The repository turns this into
+# ONE conditional UPDATE (... WHERE status IN the allowed sources), so a stale or racing session
+# cannot make a move that is no longer legal (two sends, or sent -> failed). An empty set = final.
+# Lead flow is the spec's section 5; a classifier failure or an unsupported language skips
+# "classified" -> "auto_replied" and goes straight to "acknowledged" (routes 1 and 2).
+LEAD_TRANSITIONS: dict[LeadStatus, frozenset[LeadStatus]] = {
+    LeadStatus.NEW: frozenset({LeadStatus.CLASSIFIED, LeadStatus.ACKNOWLEDGED}),
+    LeadStatus.CLASSIFIED: frozenset({LeadStatus.AUTO_REPLIED, LeadStatus.ACKNOWLEDGED}),
+    LeadStatus.AUTO_REPLIED: frozenset({LeadStatus.DONE}),
+    # DONE straight from acknowledged: routes 1 and 2 have no draft, staff handle them by phone.
+    LeadStatus.ACKNOWLEDGED: frozenset({LeadStatus.AWAITING_APPROVAL, LeadStatus.DONE}),
+    LeadStatus.AWAITING_APPROVAL: frozenset({LeadStatus.REPLIED, LeadStatus.DONE}),
+    LeadStatus.REPLIED: frozenset({LeadStatus.DONE}),
+    LeadStatus.DONE: frozenset(),
+}
+
+# Replies: a draft is approved or rejected by staff; an approved (or system-made) reply is sent or
+# fails; a failed one may be resent or fail again (the new error replaces the old). "drafted" may go
+# straight to sent/failed because acknowledgments and auto-replies need no approval.
+# SENT and REJECTED are final: "sent is final" (spec section 7) is this table.
+REPLY_TRANSITIONS: dict[ReplyStatus, frozenset[ReplyStatus]] = {
+    ReplyStatus.DRAFTED: frozenset(
+        {ReplyStatus.APPROVED, ReplyStatus.REJECTED, ReplyStatus.SENT, ReplyStatus.FAILED}
+    ),
+    ReplyStatus.APPROVED: frozenset({ReplyStatus.SENT, ReplyStatus.FAILED}),
+    ReplyStatus.FAILED: frozenset({ReplyStatus.SENT, ReplyStatus.FAILED}),
+    ReplyStatus.SENT: frozenset(),
+    ReplyStatus.REJECTED: frozenset(),
+}
+
 # Same strings as router.Action, written out so the DB layer does not import the router.
 REPLY_KINDS = ("auto_reply", "acknowledgment", "draft")
 AUDIT_ACTIONS = ("approve", "edit", "reject", "resend", "login", "logout")
@@ -58,9 +88,14 @@ class Lead(Base):
         CheckConstraint("char_length(email) <= 254", name="ck_leads_email_len"),
         CheckConstraint("char_length(phone) <= 50", name="ck_leads_phone_len"),
         CheckConstraint("char_length(message) <= 10000", name="ck_leads_message_len"),
+        # An index is a sorted lookup list: without one, Postgres reads every row to answer a query.
+        # Each one below costs a little on every insert, so only the queries we really run get one.
+        # Dashboard lists newest first, and retention asks "older than 90 days" (range on time).
         Index("ix_leads_created_at", "created_at"),
+        # Dashboard queues ("awaiting_approval", "new") filter by status. Not used by code until 4d.
         Index("ix_leads_status", "status"),
-        # Duplicate detection looks up "same dedup_key in the last 2 minutes".
+        # Duplicate detection looks up "same dedup_key in the last 2 minutes": equal key, then a
+        # time range. Both columns in one index, so that lookup stays fast on every submission.
         Index("ix_leads_dedup_key_created_at", "dedup_key", "created_at"),
     )
 
@@ -82,8 +117,16 @@ class Lead(Base):
     ai_reason: Mapped[str | None] = mapped_column(Text)
     needs_manual_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     status: Mapped[str] = mapped_column(String(30), default=LeadStatus.NEW.value)
+    # "Anonymized" = nobody can tell who this patient was any more. After 90 days the retention
+    # job blanks name, email, phone, message and the reply texts (DSGVO: keep personal data only
+    # as long as needed) but keeps category, risk, status and dates, so statistics still work.
+    # NULL = still holds personal data; a timestamp = blanked at that moment. Retention skips
+    # leads that have it, and the repository refuses to attach new personal data to them.
     anonymized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # sha256 hex of lower-cased email + NUL + stripped message; blanked by retention.
+    # Duplicate fingerprint: sha256 hex of lower-cased email + NUL + stripped message. Two
+    # submissions with the same key within 2 minutes are one lead (a double click, a retry).
+    # A hash, so we compare without storing a second copy of the text, but it is still derived
+    # from personal data, so retention blanks it.
     dedup_key: Mapped[str | None] = mapped_column(Text)
 
 
@@ -105,6 +148,9 @@ class Reply(Base):
     __table_args__ = (
         CheckConstraint(_in_list("kind", REPLY_KINDS), name="ck_replies_kind"),
         CheckConstraint(_in_list("status", ReplyStatus), name="ck_replies_status"),
+        # "All replies of this lead" (replies_for) and, in 4d, "which leads have a drafted reply".
+        # lead_id comes first, so it also serves plain lead_id lookups (Postgres does not index
+        # foreign keys by itself).
         Index("ix_replies_lead_id_status", "lead_id", "status"),
     )
 

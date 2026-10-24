@@ -1,8 +1,8 @@
 """Daily DSGVO job: blank personal data of leads older than RETENTION_DAYS and print the count.
 
 Run:  uv run python -m lead_responder.scripts.run_retention
-Safe to run any number of times: a second run returns 0 and moves no timestamps; it only
-blanks leftover text on already anonymized leads (the sweep).
+Safe to run any number of times. A later run returns 0 and moves no timestamps. Two runs at
+once share the batches between them: each lead is handled exactly once.
 """
 from dotenv import load_dotenv
 

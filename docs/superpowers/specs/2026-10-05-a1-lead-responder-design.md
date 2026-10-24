@@ -111,6 +111,7 @@ new → classified ─┬─ routine   → auto_replied ────────
                                                  ├─ approve/edit → replied → done
                                                  └─ reject (handled by phone) → done
 ```
+Added in 4a: this flow, and the reply statuses, are enforced by `LEAD_TRANSITIONS` / `REPLY_TRANSITIONS` in `db/models.py`; the repository changes a status with one conditional UPDATE (`WHERE status IN` the allowed sources) and raises `InvalidTransition` otherwise. Leads from routes 1 and 2 (no draft) go `acknowledged → done`; a classifier failure goes `new → acknowledged`. `sent` and `rejected` replies are final; a `failed` reply may be resent or fail again.
 
 `ai_body` vs `body` yields "% drafts approved unchanged"; `created_at` vs `sent_at` yields reply latency. The dashboard shows both.
 
@@ -128,7 +129,7 @@ new → classified ─┬─ routine   → auto_replied ────────
 ## 6. DSGVO handling (lightweight, from day one)
 - Data minimization: phone optional; only **redacted message text** is sent to Anthropic — never name, email or phone fields.
 - Mandatory consent checkbox; `consent_at` stored. Form rejects submissions without consent.
-- Retention job anonymizes personal fields after `RETENTION_DAYS` (default 90): on the lead `name`, `email`, `phone`, `message`, `dedup_key` and `ai_reason` (free text about the patient); on its replies `body` (becomes `[anonymized]`), `ai_body` and `error` (may hold a recipient address). Retention runs in batches (one short transaction each) and also sweeps leftovers on already anonymized leads; the repository refuses new replies and classifications for them. Statistics (category, risk, urgency, language, statuses, timestamps, `edited`) and the audit log (which references IDs, not personal data) are retained.
+- Retention job anonymizes personal fields after `RETENTION_DAYS` (default 90): on the lead `name`, `email`, `phone`, `message`, `dedup_key` and `ai_reason` (free text about the patient); on its replies `body` (becomes `[anonymized]`), `ai_body` and `error` (may hold a recipient address). Retention runs in batches (one short transaction each). Personal data cannot re-enter an anonymized lead: the repository checks the lead under a row lock (it waits for a running retention batch; `FOR SHARE`, or `FOR NO KEY UPDATE` where the lead row is updated afterwards, to avoid a lock-upgrade deadlock), refuses new replies and classifications for it, and drops a send-error text for it (the status still moves). Statistics (category, risk, urgency, language, statuses, timestamps, `edited`) and the audit log (which references IDs, not personal data) are retained.
 - Audit log provides accountability for who sent what to which patient.
 - README section listing data processors (Anthropic, email provider, host) and the DPAs/AVVs a real client deployment would require, plus the names-in-free-text limitation. Legal points are orientation, not legal advice; Anthropic's current DPA/data-handling terms to be checked before any real client use.
 
@@ -201,12 +202,12 @@ Written before building layer 4. Status: **design** = handled by the design belo
 | 8 | The "instant" acknowledgment waits for slow AI calls (worst case ~13 min) | Send the fixed acknowledgment first, then do the AI calls, with an overall deadline | 4b | test |
 | 9 | Form abused: huge body, no consent, invalid email, hostile name, flood from one source | Size caps, consent and email validation, `sanitize_name`, duplicate window, per-IP and per-email rate limit | 4b | test |
 | 10 | The form becomes a mail relay (stranger's address + attacker text) | Reply goes only to the form's email address, text is guardrailed final text, rate limit per address and per day | 4b | test |
-| 11 | Email sent twice, or never recorded as sent | Typed sender result (`accepted`/`failed`/`timeout`), no auto-retry after a timeout, `sent` is final (spec §7) | 4b | test |
+| 11 | Email sent twice, or never recorded as sent | Typed sender result (`accepted`/`failed`/`timeout`), no auto-retry after a timeout, `sent` is final (spec §7; the rule itself is built and tested in 4a: `REPLY_TRANSITIONS` plus the conditional UPDATE; the sender must use `set_reply_status` and handle `InvalidTransition`) | 4b | test |
 | 12 | Login brute force, user enumeration, stolen session | argon2, lockout 5/15 min, generic error, signed cookie 8 h, secure flags | 4c | test |
 | 13 | A staff action is not attributable | Every approve/edit/reject/resend/login writes an audit row in the same transaction | 4c | test |
 | 14 | XSS or injection through patient text on the dashboard | Jinja autoescape stays ON, no `|safe`, CSP header | 4d | test |
 | 15 | Staff approve an edited draft with a link or number the AI never wrote | Guardrail warnings are shown and stored in `audit_log.details` (warn, never block, spec §5.1) | 4d | design |
-| 16 | Two staff edit or send the same draft at once | Status check inside the transaction (only `drafted` can be approved) | 4d | test |
+| 16 | Two staff edit or send the same draft at once | Status check inside the transaction (only `drafted` can be approved); the conditional UPDATE in `set_reply_status` is built and tested in 4a, the approve action in 4d must call it and show `InvalidTransition` as "already handled" | 4d | test |
 | 17 | A sensitive lead waits unnoticed | Sensitive queue first, drafts over `APPROVAL_WARN_HOURS` highlighted, route-1/2 leads flagged `needs_manual_review` | 4d | design |
 | 18 | Demo site posts to the wrong place or leaks the API key | Static page only knows the form URL; no secrets in the page | 4e | design |
 | 19 | Cost abuse (unlimited AI calls from one actor) | Rate limits (#9) plus a daily AI call cap per instance | 4b | parked until a client deployment |

@@ -13,7 +13,9 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
-from lead_responder.db.models import Lead, LeadStatus, Reply, ReplyStatus
+from lead_responder.db.models import (
+    LEAD_TRANSITIONS, REPLY_TRANSITIONS, Lead, LeadStatus, Reply, ReplyStatus,
+)
 from lead_responder.models import Classification
 from lead_responder.router import Action, Decision
 
@@ -26,9 +28,11 @@ MAX_NAME, MAX_EMAIL, MAX_PHONE, MAX_MESSAGE = 200, 254, 50, 10_000
 # Width of leads.language, read from the model so the two cannot drift apart.
 LANGUAGE_MAX = Lead.__table__.c.language.type.length
 
-# Retention handles this many leads per transaction: short locks, and no giant IN (...) list
-# (Postgres allows at most 65535 bind parameters in one statement).
+# Retention handles this many leads per transaction: short locks, short IN (...) lists.
 RETENTION_BATCH_SIZE = 5000
+# Postgres allows 65535 bind parameters per statement and the batch's ids are one IN list, so a
+# bigger batch would fail on every run. Capped below the limit, leaving room for the other values.
+MAX_RETENTION_BATCH_SIZE = 60_000
 
 
 # Postgres text columns cannot hold NUL (\x00); drop it instead of crashing the insert.
@@ -60,6 +64,12 @@ def _dedup_key(email: str, message: str) -> str:
 # Postgres advisory locks take a signed 64-bit integer: use the first 8 bytes of the hash.
 def _lock_id(dedup_key: str) -> int:
     return int.from_bytes(bytes.fromhex(dedup_key[:16]), "big", signed=True)
+
+
+# A ValueError subclass: the status change is not allowed from the current status (or another
+# session changed the row first). Callers that already catch ValueError keep working.
+class InvalidTransition(ValueError):
+    pass
 
 
 class Repository:
@@ -97,6 +107,8 @@ class Repository:
             if existing is not None:
                 self.session.commit()  # releases the lock
                 return existing, False
+
+            # was not found and therefor has to get created
             lead = Lead(
                 channel=channel, name=name, email=email, phone=phone, message=message,
                 consent_at=consent_at, created_at=now, status=LeadStatus.NEW.value, dedup_key=key,
@@ -108,18 +120,28 @@ class Repository:
             self.session.rollback()
             raise
 
+    # Reads end their transaction too (commit on success, rollback on error), so a failed read
+    # cannot break the next write and no session sits "idle in transaction". populate_existing
+    # reloads from the database, so a long-lived session never shows rows another session changed.
     def get_lead(self, lead_id: int) -> Lead | None:
-        return self.session.get(Lead, lead_id)
+        try:
+            lead = self.session.get(Lead, lead_id, populate_existing=True)
+            self.session.commit()
+            return lead
+        except BaseException:
+            self.session.rollback()
+            raise
 
     # Stores the classifier's result and the router's flags. The classification can be None
     # (the AI failed); the flags from the decision are then still saved so staff see the lead.
     # Refuses an anonymized lead: new text about the patient would never be cleaned again.
+    # It updates the lead row, so it locks it with the stronger FOR NO KEY UPDATE (see below).
     def set_classification(
         self, lead_id: int, *, classification: Classification | None, decision: Decision,
     ) -> Lead:
         try:
             lead = self._require(lead_id)
-            self._refuse_if_anonymized(lead_id)
+            self._refuse_if_anonymized(lead_id, will_update_lead=True)
             if classification is not None:
                 lead.category = classification.category.value
                 lead.risk = classification.risk.value
@@ -138,12 +160,12 @@ class Repository:
             raise
 
     # Only a LeadStatus is accepted: a typo like "replyed" fails here with a clear message.
+    # Only moves listed in LEAD_TRANSITIONS are allowed (InvalidTransition otherwise).
     def set_lead_status(self, lead_id: int, status: LeadStatus) -> Lead:
         if not isinstance(status, LeadStatus):
             raise ValueError(f"status must be a LeadStatus, got {status!r}")
         try:
-            lead = self._require(lead_id)
-            lead.status = status.value
+            lead = self._move_status(Lead, lead_id, status, LEAD_TRANSITIONS, {})
             self.session.commit()
             return lead
         except BaseException:
@@ -180,9 +202,14 @@ class Repository:
             self.session.rollback()
             raise
 
-    # Moves a reply to a new status. sent_at is set only when the new status is "sent".
+    # Moves a reply to a new status, only along REPLY_TRANSITIONS (InvalidTransition otherwise:
+    # "sent" and "rejected" are final, and a second session that still believes the reply is
+    # "approved" cannot send it again). sent_at is set only when the new status is "sent".
     # `error` is assigned every time (None clears it: a successful resend must not keep an old
     # error); approved_by and edited are only changed when given, so later steps do not wipe them.
+    # An `error` text may hold the recipient's address (personal data): for an anonymized lead the
+    # status still moves but the error is dropped. The lead is checked under a lock first, then the
+    # reply is updated: the same order as retention (lead, then replies), so they cannot deadlock.
     def set_reply_status(
         self, reply_id: int, status: ReplyStatus, *, now: datetime, error: str | None = None,
         approved_by: int | None = None, edited: bool | None = None,
@@ -191,17 +218,18 @@ class Repository:
             raise ValueError(f"status must be a ReplyStatus, got {status!r}")
         _require_aware("now", now)
         try:
-            reply = self.session.get(Reply, reply_id)
-            if reply is None:
-                raise LookupError(f"reply {reply_id} not found")
-            reply.status = status.value
-            reply.error = _clean(error) if error is not None else None
+            if error is not None:
+                lead_id = self.session.scalar(select(Reply.lead_id).where(Reply.id == reply_id))
+                if lead_id is not None and self._anonymized_under_lock(lead_id):
+                    error = None
+            values: dict = {"error": _clean(error) if error is not None else None}
             if status is ReplyStatus.SENT:
-                reply.sent_at = now
+                values["sent_at"] = now
             if approved_by is not None:
-                reply.approved_by = approved_by
+                values["approved_by"] = approved_by
             if edited is not None:
-                reply.edited = edited
+                values["edited"] = edited
+            reply = self._move_status(Reply, reply_id, status, REPLY_TRANSITIONS, values)
             self.session.commit()
             return reply
         except BaseException:
@@ -209,10 +237,18 @@ class Repository:
             raise
 
     # All replies of one lead, oldest first (id breaks ties between equal timestamps).
+    # Same transaction handling and fresh reload as get_lead.
     def replies_for(self, lead_id: int) -> list[Reply]:
-        return list(self.session.scalars(
-            select(Reply).where(Reply.lead_id == lead_id).order_by(Reply.created_at, Reply.id)
-        ))
+        try:
+            replies = list(self.session.scalars(
+                select(Reply).where(Reply.lead_id == lead_id).order_by(Reply.created_at, Reply.id),
+                execution_options={"populate_existing": True},
+            ))
+            self.session.commit()
+            return replies
+        except BaseException:
+            self.session.rollback()
+            raise
 
     # DSGVO retention: blank the personal data of every lead created BEFORE `cutoff` (strictly:
     # a lead exactly at the cutoff stays) that is not anonymized yet. Reply texts, reply errors
@@ -223,22 +259,21 @@ class Repository:
     # Work is done in batches of `batch_size` leads, each batch ONE short transaction (select the
     # next ids FOR UPDATE, blank their replies and the leads, commit), until none are left. This
     # avoids a giant IN list and long locks. A crash mid-run is safe: finished batches stay
-    # done, the `anonymized_at IS NULL` filter makes a re-run continue; a second run returns 0 (it only
-    # re-runs the sweep below, which blanks leftovers).
-    # Finally a SWEEP blanks leftovers on leads that are ALREADY anonymized (a reply or
-    # ai_reason that slipped in later, e.g. a send error written after anonymization); the
-    # sweep does not change the return value. Returns how many leads were newly anonymized.
+    # done, the `anonymized_at IS NULL` filter makes a re-run continue; a later run returns 0.
+    # There is no clean-up pass: personal data cannot re-enter an anonymized lead, because every
+    # write path checks the lead under a lock that waits for this method's FOR UPDATE on the batch.
+    # Returns how many leads were newly anonymized.
     def anonymize_older_than(
         self, *, cutoff: datetime, now: datetime, batch_size: int = RETENTION_BATCH_SIZE,
     ) -> int:
         _require_aware("cutoff", cutoff)
         _require_aware("now", now)
-        if batch_size < 1:
-            raise ValueError("batch_size must be at least 1")
+        if not 1 <= batch_size <= MAX_RETENTION_BATCH_SIZE:
+            raise ValueError(f"batch_size must be between 1 and {MAX_RETENTION_BATCH_SIZE}")
         total = 0
         try:
             while True:
-                # FOR UPDATE: a concurrent run waits here, then finds nothing left to do.
+                # FOR UPDATE: two runs at once take turns per batch and share the work, each lead once.
                 ids = list(self.session.scalars(
                     select(Lead.id)
                     .where(Lead.created_at < cutoff, Lead.anonymized_at.is_(None))
@@ -259,22 +294,7 @@ class Repository:
                 )
                 self.session.commit()
                 total += len(ids)
-            # Sweep: set-based UPDATEs with a subquery (no id list), one transaction.
-            done = select(Lead.id).where(Lead.anonymized_at.is_not(None))
-            self.session.execute(
-                update(Reply)
-                .where(
-                    Reply.lead_id.in_(done),
-                    (Reply.body != "[anonymized]") | Reply.ai_body.is_not(None) | Reply.error.is_not(None),
-                )
-                .values(body="[anonymized]", ai_body=None, error=None)
-            )
-            self.session.execute(
-                update(Lead)
-                .where(Lead.anonymized_at.is_not(None), Lead.ai_reason.is_not(None))
-                .values(ai_reason=None)
-            )
-            self.session.commit()
+            self.session.commit()  # ends the transaction the last (empty) batch query opened
             # Loaded Lead/Reply objects in this session are now stale; drop them so callers re-read.
             self.session.expire_all()
             return total
@@ -282,12 +302,51 @@ class Repository:
             self.session.rollback()
             raise
 
-    # Raises ValueError for an anonymized lead. Reads the column straight from the database
-    # (not the identity map) inside the caller's transaction, so a cached object cannot hide it.
-    def _refuse_if_anonymized(self, lead_id: int) -> None:
-        anonymized_at = self.session.scalar(select(Lead.anonymized_at).where(Lead.id == lead_id))
-        if anonymized_at is not None:
+    # Raises ValueError for an anonymized lead.
+    def _refuse_if_anonymized(self, lead_id: int, *, will_update_lead: bool = False) -> None:
+        if self._anonymized_under_lock(lead_id, will_update_lead=will_update_lead):
             raise ValueError(f"lead {lead_id} is anonymized")
+
+    # True if the lead is anonymized, read from the database (not the cache) under a row lock.
+    # Why a lock: a plain read does not wait for a running retention batch, still sees "not
+    # anonymized", and the write after it would put patient text on a blanked lead. The lock waits
+    # for the batch, then reads its result, and lasts until the caller's commit/rollback.
+    # Which lock: callers that only INSERT/UPDATE other rows (add_reply, set_reply_status) take
+    # FOR SHARE. A caller that then UPDATEs the lead row itself (set_classification) must take
+    # FOR NO KEY UPDATE: two sessions holding FOR SHARE would each wait for the other to let go
+    # before updating (a deadlock). FOR NO KEY UPDATE makes them take turns instead.
+    def _anonymized_under_lock(self, lead_id: int, *, will_update_lead: bool = False) -> bool:
+        stmt = select(Lead.anonymized_at).where(Lead.id == lead_id)
+        stmt = stmt.with_for_update(key_share=True) if will_update_lead else stmt.with_for_update(read=True)
+        return self.session.scalar(stmt) is not None
+
+    # The status change as ONE conditional statement (compare-and-set):
+    #   UPDATE <table> SET status = :new, ... WHERE id = :id AND status IN (the statuses that may move to :new)
+    # The database checks the CURRENT status and changes it in the same step, under the row lock, so
+    # two sessions racing for the same move cannot both succeed: the second waits, re-checks the
+    # WHERE and finds 0 rows. (A read-then-write in Python would let both through.)
+    # RETURNING hands back the fresh row; populate_existing refreshes an object this session
+    # already holds, so a cached copy never hides the change. Does not commit: callers do.
+    # Step 1 only asks "does this id exist?" (LookupError), it decides nothing about the move.
+    # Step 2 is the real check. 0 rows there means the current status does not allow the move
+    # (or another session changed it first): InvalidTransition. Rows are never deleted, so a
+    # row that passed step 1 cannot disappear before step 2.
+    def _move_status(self, model, row_id: int, new, table: dict, values: dict):
+        if self.session.scalar(select(model.id).where(model.id == row_id)) is None:
+            raise LookupError(f"{model.__tablename__} {row_id} not found")
+        sources = [old.value for old, targets in table.items() if new in targets]
+        stmt = (
+            update(model)
+            .where(model.id == row_id, model.status.in_(sources))
+            .values(status=new.value, **values)
+            .returning(model)
+        )
+        row = self.session.scalars(stmt, execution_options={"populate_existing": True}).one_or_none()
+        if row is None:
+            raise InvalidTransition(
+                f"{model.__tablename__} {row_id}: moving to {new.value} is not allowed from its current status"
+            )
+        return row
 
     def _require(self, lead_id: int) -> Lead:
         lead = self.session.get(Lead, lead_id)
