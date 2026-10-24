@@ -27,3 +27,10 @@ SMTP_USER = os.environ.get("SMTP_USER") or None
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD") or None
 SMTP_TIMEOUT_SECONDS = float(os.environ.get("SMTP_TIMEOUT_SECONDS", "10"))
 MAIL_FROM = os.environ.get("MAIL_FROM", "")
+
+# Layer 4b: the sweep (scripts/run_sweep.py). An acknowledgment claimed longer than
+# SENDING_TIMEOUT_MINUTES ago with no result is resent, at most MAX_SEND_ATTEMPTS claims in all;
+# a lead older than NO_REPLY_SWEEP_MINUTES with no first reply gets the fallback acknowledgment.
+SENDING_TIMEOUT_MINUTES = int(os.environ.get("SENDING_TIMEOUT_MINUTES", "10"))
+MAX_SEND_ATTEMPTS = int(os.environ.get("MAX_SEND_ATTEMPTS", "3"))
+NO_REPLY_SWEEP_MINUTES = int(os.environ.get("NO_REPLY_SWEEP_MINUTES", "5"))

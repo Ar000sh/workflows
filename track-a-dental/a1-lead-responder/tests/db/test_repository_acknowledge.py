@@ -187,6 +187,18 @@ def test_acknowledge_lead_refuses_anonymized_and_unknown_leads(session):
     assert first_replies(session, lead.id) == []
 
 
+# A lead the per-address limit left without email on purpose gets no acknowledgment from any
+# writer (a sweep that read the lead just before suppress_lead ran, or the deadline fallback).
+def test_acknowledge_lead_refuses_a_suppressed_lead(session):
+    repo = Repository(session)
+    lead = make_lead(repo)
+    repo.suppress_lead(lead.id)
+    with pytest.raises(InvalidTransition, match="suppressed"):
+        ack(repo, lead.id)
+    assert first_replies(session, lead.id) == []
+    assert repo.get_lead(lead.id).status == "acknowledged"
+
+
 # A draft (staff reply) is not a first reply: it does not block the acknowledgment.
 def test_a_draft_reply_does_not_count_as_first_reply(session):
     from lead_responder.db.models import ReplyStatus

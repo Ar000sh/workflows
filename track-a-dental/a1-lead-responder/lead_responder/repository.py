@@ -190,9 +190,11 @@ class Repository:
     #   1. lock the lead FOR NO KEY UPDATE and refuse an anonymized one (ValueError). The strong lock
     #      at once, because step 3 updates the lead row: taking FOR SHARE first and upgrading later
     #      deadlocks two writers (the 4a lesson). The lock makes all writers of one lead take turns.
-    #   2. refuse if the lead already has a first reply (kind acknowledgment or auto_reply). Read
-    #      after the lock, so the loser of the race sees the winner's committed reply. This check is
-    #      the real guard: an "acknowledged" lead without a reply is allowed (the sweep's case).
+    #   2. refuse a suppressed lead (the per-address limit left it without email on purpose: a
+    #      suppressed lead gets no email, whoever asks), then refuse if the lead already has a first
+    #      reply (kind acknowledgment or auto_reply). Both read after the lock, so a writer sees what
+    #      suppress_lead or the winner of the race committed. The first-reply check is the real
+    #      guard: an "acknowledged" lead without a reply is allowed (the sweep's case).
     #   3. ACKNOWLEDGMENT moves new/classified -> acknowledged (an acknowledged lead stays);
     #      AUTO_REPLY never moves the status (the pipeline moves it to auto_replied after the send).
     #      Any other status is past the first reply: InvalidTransition.
@@ -208,9 +210,14 @@ class Repository:
         _require_aware("now", now)
         try:
             self._refuse_if_anonymized(lead_id, will_update_lead=True)
-            status = self.session.scalar(select(Lead.status).where(Lead.id == lead_id))
-            if status is None:
+            row = self.session.execute(
+                select(Lead.status, Lead.send_suppressed).where(Lead.id == lead_id)
+            ).one_or_none()
+            if row is None:
                 raise LookupError(f"lead {lead_id} not found")
+            status, suppressed = row
+            if suppressed:
+                raise InvalidTransition(f"lead {lead_id} is suppressed: no email on purpose")
             if self._has_first_reply(lead_id):
                 raise InvalidTransition(f"lead {lead_id} already has a first reply")
             flags = {"needs_manual_review": True} if needs_manual_review else {}
@@ -339,6 +346,35 @@ class Repository:
             self.session.rollback()
             raise
 
+    # Sweep part 1: gives up a claim nobody finished, sending -> failed, so the sweep can claim the
+    # reply again (failed -> sending) and resend it. ONE conditional UPDATE that re-checks the
+    # stuck condition: status is still "sending" AND claimed_at is still before `claimed_before`.
+    # Why both: the sweep read its list earlier; if another sweep has resent the reply since, the
+    # status is "sending" again but with a fresh claimed_at, and a status-only check would let this
+    # sweep take over a send in flight and email a second copy. 0 rows: InvalidTransition.
+    # `error` must hold no personal data (the sweep passes a fixed text), so no lead lock is needed:
+    # this touches only the reply row. sending -> failed is in REPLY_TRANSITIONS.
+    def fail_stuck_reply(self, reply_id: int, *, claimed_before: datetime, error: str) -> Reply:
+        _require_aware("claimed_before", claimed_before)
+        try:
+            reply = self.session.scalars(
+                update(Reply)
+                .where(
+                    Reply.id == reply_id, Reply.status == ReplyStatus.SENDING.value,
+                    Reply.claimed_at < claimed_before,
+                )
+                .values(status=ReplyStatus.FAILED.value, error=_clean(error))
+                .returning(Reply),
+                execution_options={"populate_existing": True},
+            ).one_or_none()
+            if reply is None:
+                raise InvalidTransition(f"replies {reply_id}: not a stuck sending reply (any more)")
+            self.session.commit()
+            return reply
+        except BaseException:
+            self.session.rollback()
+            raise
+
     # All replies of one lead, oldest first (id breaks ties between equal timestamps).
     # Same transaction handling and fresh reload as get_lead.
     def replies_for(self, lead_id: int) -> list[Reply]:
@@ -369,8 +405,8 @@ class Repository:
     # Sweep part 1: replies of one kind stuck in "sending" (outcome unknown) whose claim is older
     # than `claimed_before` (strictly) and that have been tried fewer than `max_attempts` times.
     # The sweep asks only for acknowledgments; a draft is never resent automatically.
-    # A plain read, no lock: the sweep then moves each one with a conditional status change,
-    # which is what stops two sweeps from both acting on the same reply.
+    # A plain read, no lock: the sweep then moves each one with fail_stuck_reply, a conditional
+    # write that re-checks the stuck condition, which is what stops two sweeps from both acting on it.
     def stuck_sending_replies(
         self, *, kind: Action, claimed_before: datetime, max_attempts: int,
     ) -> list[Reply]:

@@ -14,18 +14,25 @@ The flow of send(reply_id) (spec section 6 "Sending"):
      one that failed or is in doubt puts the lead in the staff queue instead
 This is the claim-before-send (outbox) pattern: the database says who may send BEFORE the email
 leaves, because nothing can take an email back afterwards.
+
+sweep() is the scheduled clean-up (spec section 6 "Sweep", run by scripts/run_sweep.py):
+  1. acknowledgments stuck in "sending" (claimed over SENDING_TIMEOUT_MINUTES ago): sending ->
+     failed, then send() again, up to MAX_SEND_ATTEMPTS claims; at the cap they wait for staff.
+     Drafts and auto-replies in "sending" are never resent: a duplicate medical reply is not harmless
+  2. leads older than NO_REPLY_SWEEP_MINUTES with no first reply: the fallback acknowledgment
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Callable
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from lead_responder import templates
+from lead_responder import config, templates
 from lead_responder.db.models import Lead, LeadStatus, ReplyStatus
 from lead_responder.practice import Practice
 from lead_responder.prompting import sanitize_name
@@ -56,6 +63,20 @@ SEND_FROM: dict[Action, frozenset[ReplyStatus]] = {
 # "sending" is passed only by the claim's owner after its own claim: step 1 sends a reply in
 # "sending" away as ALREADY_HANDLED before the address check, so it never moves another's claim.
 _REFUSE_TO_FAILED = (ReplyStatus.DRAFTED, ReplyStatus.APPROVED, ReplyStatus.SENDING)
+
+# The error the sweep stores when it gives up a stuck claim. Fixed text: no address, no message.
+STUCK_ERROR = "stuck: retried by sweep"
+# The sweep reads ALL stuck acknowledgments (this cap is the largest Postgres integer) and splits
+# them itself into "resend" and "at the cap, left for staff", so both come from one read.
+_NO_ATTEMPT_CAP = 2**31 - 1
+
+
+# What one sweep did, for the script's printout and the tests.
+@dataclass(frozen=True)
+class SweepResult:
+    retried_acknowledgments: int   # stuck acknowledgments this sweep resent (whatever the new outcome)
+    fallback_acknowledgments: int  # leads that got the fallback acknowledgment from this sweep
+    left_for_staff: int            # stuck acknowledgments at MAX_SEND_ATTEMPTS, not resent
 
 
 # True when the lead has no address to write to: retention blanked it (DSGVO) or it is empty.
@@ -108,6 +129,51 @@ class ReplyService:
             reply_id = reply.id
         self._send(reply_id, subject_language=COMBINED_LANGUAGE)
         return True
+
+    # The scheduled clean-up (module docstring). Safe to run twice in a row (the second run finds
+    # nothing) and twice at once: every action goes through a conditional write that one sweep
+    # wins, fail_stuck_reply and the claim for part 1, acknowledge_lead's lock for part 2. A lead
+    # anonymized between the read and the action is skipped (send refuses it, acknowledge_lead
+    # raises ValueError). The reads hold no lock and no transaction while emails go out.
+    def sweep(self) -> SweepResult:
+        now = self._clock()
+        stuck_before = now - timedelta(minutes=config.SENDING_TIMEOUT_MINUTES)
+        with self._session_factory() as session:
+            repo = Repository(session)
+            stuck = repo.stuck_sending_replies(
+                kind=Action.ACKNOWLEDGMENT, claimed_before=stuck_before, max_attempts=_NO_ATTEMPT_CAP,
+            )
+            retry = [r.id for r in stuck if r.send_attempts < config.MAX_SEND_ATTEMPTS]
+            left_for_staff = len(stuck) - len(retry)
+            retried = sum(self._retry_stuck(repo, reply_id, stuck_before) for reply_id in retry)
+            leads = repo.leads_without_first_reply(
+                created_before=now - timedelta(minutes=config.NO_REPLY_SWEEP_MINUTES),
+            )
+            lead_ids = [lead.id for lead in leads]
+        fallbacks = sum(self._fallback(lead_id) for lead_id in lead_ids)
+        log.info("sweep: %s retried, %s fallback, %s left for staff", retried, fallbacks, left_for_staff)
+        return SweepResult(retried, fallbacks, left_for_staff)
+
+    # Part 1 for one reply: give up the stale claim (InvalidTransition = another sweep or a late
+    # result got there first: skip), then send() claims it again. True if an email was attempted.
+    def _retry_stuck(self, repo: Repository, reply_id: int, stuck_before: datetime) -> bool:
+        try:
+            repo.fail_stuck_reply(reply_id, claimed_before=stuck_before, error=STUCK_ERROR)
+        except InvalidTransition:
+            log.info("reply %s: stuck claim already handled", reply_id)
+            return False
+        outcome = self.send(reply_id)
+        return outcome in (SendOutcome.SENT, SendOutcome.FAILED, SendOutcome.IN_DOUBT)
+
+    # Part 2 for one lead. False: another writer gave it a first reply or it was suppressed
+    # (acknowledge_with_fallback returns False), or retention anonymized it after the read
+    # (acknowledge_lead raises ValueError).
+    def _fallback(self, lead_id: int) -> bool:
+        try:
+            return self.acknowledge_with_fallback(lead_id)
+        except ValueError:
+            log.info("lead %s: fallback skipped, lead anonymized", lead_id)
+            return False
 
     # The steps of send(). subject_language overrides the lead's language for the subject (the
     # fallback acknowledgment is bilingual whatever the lead's language is).
