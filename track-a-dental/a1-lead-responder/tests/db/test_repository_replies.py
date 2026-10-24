@@ -102,11 +102,11 @@ def test_set_reply_status_other_statuses_leave_sent_at_empty(session):
 def test_failed_reply_keeps_error_text(session):
     repo = Repository(session)
     reply = add(repo, make_lead(repo).id)
-    repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="timeout: may have been sent")
+    repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="SMTPRecipientsRefused")
     session.expire_all()
     stored = repo.replies_for(reply.lead_id)[0]
     assert stored.status == "failed"
-    assert stored.error == "timeout: may have been sent"
+    assert stored.error == "SMTPRecipientsRefused"
 
 
 def test_successful_resend_clears_old_error(session):

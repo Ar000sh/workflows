@@ -330,9 +330,9 @@ def test_error_text_is_stored_for_a_normal_lead(session):
     repo = Repository(session)
     lead = make_lead(repo, NOW - timedelta(days=1))
     reply = add_reply(repo, lead.id, status=ReplyStatus.DRAFTED)
-    repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="timeout: may have been sent")
+    repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="SMTPRecipientsRefused")
     session.expire_all()
-    assert session.get(Reply, reply.id).error == "timeout: may have been sent"
+    assert session.get(Reply, reply.id).error == "SMTPRecipientsRefused"
 
 
 # Two retention jobs started at the same moment (an overlapping schedule, a manual run during the
