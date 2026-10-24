@@ -62,8 +62,10 @@ def test_reply_texts_and_dedup_key_are_blanked_too(session):
     r2 = add_reply(repo, lead.id, 2, ReplyStatus.DRAFTED)
     # a failed send may leave the recipient address in `error`
     repo.set_reply_status(r1.id, ReplyStatus.FAILED, now=NOW, error="550 rejected: anna@example.com")
+    repo.set_reply_status(r1.id, ReplyStatus.SENDING, now=NOW)
     repo.set_reply_status(r1.id, ReplyStatus.SENT, now=NOW)
     repo.set_reply_status(r2.id, ReplyStatus.FAILED, now=NOW, error="550 rejected: anna@example.com")
+    repo.set_reply_status(r2.id, ReplyStatus.SENDING, now=NOW)
     repo.set_reply_status(r2.id, ReplyStatus.SENT, now=NOW, error="boom anna@example.com")
     lonely = make_lead(repo, CUTOFF - timedelta(days=2), email="b@example.com")  # no replies
 
@@ -77,6 +79,19 @@ def test_reply_texts_and_dedup_key_are_blanked_too(session):
         assert rep.body == "[anonymized]" and rep.ai_body is None and rep.error is None
         assert rep.status == "sent" and rep.edited is True and rep.kind == "draft"
         assert rep.sent_at == NOW and rep.created_at == NOW
+
+
+# mailbox_key is the normalized address, so it is personal data and goes with the rest.
+def test_retention_blanks_mailbox_key(session):
+    repo = Repository(session)
+    lead = make_lead(repo, CUTOFF - timedelta(days=1))
+    lead.mailbox_key = "anna@example.com"
+    session.commit()
+
+    assert repo.anonymize_older_than(cutoff=CUTOFF, now=NOW) == 1
+
+    session.expire_all()
+    assert repo.get_lead(lead.id).mailbox_key is None
 
 
 def test_exact_boundary(session):

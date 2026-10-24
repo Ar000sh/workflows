@@ -188,6 +188,10 @@ class Repository:
     # Moves a reply to a new status, only along REPLY_TRANSITIONS (InvalidTransition otherwise:
     # "sent" and "rejected" are final, and a second session that still believes the reply is
     # "approved" cannot send it again). sent_at is set only when the new status is "sent".
+    # Moving to "sending" IS the claim: the same UPDATE stamps claimed_at and adds 1 to
+    # send_attempts, so winning the claim and counting the attempt cannot come apart. The one
+    # session that wins is the only one allowed to send; every other gets InvalidTransition.
+    # Callers commit the claim (this method does) BEFORE the email goes out.
     # `error` is assigned every time (None clears it: a successful resend must not keep an old
     # error); approved_by and edited are only changed when given, so later steps do not wipe them.
     # An `error` text may hold the recipient's address (personal data): for an anonymized lead the
@@ -208,6 +212,9 @@ class Repository:
             values: dict = {"error": _clean(error) if error is not None else None}
             if status is ReplyStatus.SENT:
                 values["sent_at"] = now
+            if status is ReplyStatus.SENDING:
+                values["claimed_at"] = now
+                values["send_attempts"] = Reply.send_attempts + 1  # computed by the database, not read first
             if approved_by is not None:
                 values["approved_by"] = approved_by
             if edited is not None:
@@ -235,7 +242,8 @@ class Repository:
 
     # DSGVO retention: blank the personal data of every lead created BEFORE `cutoff` (strictly:
     # a lead exactly at the cutoff stays) that is not anonymized yet. Reply texts, reply errors
-    # (they may hold a recipient address), the dedup_key hash and ai_reason (free text about the
+    # (they may hold a recipient address), the dedup_key hash, the mailbox_key (the normalized
+    # address) and ai_reason (free text about the
     # patient) count as personal data too. Category, risk, urgency, language, statuses and
     # timestamps stay, so the statistics survive. Audit rows are not touched (they only point
     # at ids).
@@ -272,7 +280,7 @@ class Repository:
                 self.session.execute(
                     update(Lead).where(Lead.id.in_(ids)).values(
                         name="[anonymized]", email="", phone=None, message="",
-                        dedup_key=None, ai_reason=None, anonymized_at=now,
+                        dedup_key=None, mailbox_key=None, ai_reason=None, anonymized_at=now,
                     )
                 )
                 self.session.commit()

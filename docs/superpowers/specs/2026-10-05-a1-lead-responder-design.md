@@ -96,9 +96,9 @@ Lead saved, flagged `language_unsupported`, treated as sensitive; **DE+EN combin
 Sent immediately (`AUTO_REPLY_MODE=always`, default) or only outside opening hours (`outside_hours`; during opening hours routine leads get the fixed instant acknowledgment (no AI paragraph) and an AI draft for staff to review and send). Auto-replies always include the Doctolib link.
 
 ## 5. Data model
-**`leads`** — `id`, `created_at`, `channel` (`web_form`; later `whatsapp`, `email`), `name`, `email`, `phone` (nullable), `message`, `consent_at`, `category`, `risk`, `urgency`, `language`, `language_unsupported`, `ai_reason`, `needs_manual_review`, `status`, `anonymized_at`, `dedup_key` (added in 4a: sha256 hex of lower-cased email + NUL character (never present in cleaned text) + stripped message, used for duplicate detection; nullable, blanked by retention).
+**`leads`** — `id`, `created_at`, `channel` (`web_form`; later `whatsapp`, `email`), `name`, `email`, `phone` (nullable), `message`, `consent_at`, `category`, `risk`, `urgency`, `language`, `language_unsupported`, `ai_reason`, `needs_manual_review`, `status`, `anonymized_at`, `mailbox_key` and `send_suppressed` (added in 4b: the normalized address for the per-address limit, blanked by retention; and "no email on purpose"), `dedup_key` (added in 4a: sha256 hex of lower-cased email + NUL character (never present in cleaned text) + stripped message, used for duplicate detection; nullable, blanked by retention).
 
-**`replies`** — `id`, `lead_id`, `kind` (`auto_reply` | `acknowledgment` | `draft`), `ai_body`, `body`, `status` (`drafted` | `approved` | `sent` | `rejected` | `failed`), `error`, `approved_by` (→ `staff_users.id`), `sent_at`, `created_at`, `edited` (added in 4a: boolean, nullable; true when staff changed the AI draft, keeps the "approved unchanged" statistic after retention blanks the texts).
+**`replies`** — `id`, `lead_id`, `kind` (`auto_reply` | `acknowledgment` | `draft`), `ai_body`, `body`, `status` (`drafted` | `approved` | `sending` | `sent` | `rejected` | `failed`; `sending` added in 4b: the claim made before a send, meaning "outcome unknown"), `claimed_at` and `send_attempts` (added in 4b: when the current send was claimed, and how many claims there were), `error`, `approved_by` (→ `staff_users.id`), `sent_at`, `created_at`, `edited` (added in 4a: boolean, nullable; true when staff changed the AI draft, keeps the "approved unchanged" statistic after retention blanks the texts).
 
 **`staff_users`** — `id`, `name`, `email`, `password_hash` (argon2), `failed_attempts`, `locked_until`, `created_at`, `disabled_at`.
 
@@ -111,7 +111,7 @@ new → classified ─┬─ routine   → auto_replied ────────
                                                  ├─ approve/edit → replied → done
                                                  └─ reject (handled by phone) → done
 ```
-Added in 4a: this flow, and the reply statuses, are enforced by `LEAD_TRANSITIONS` / `REPLY_TRANSITIONS` in `db/models.py`; the repository changes a status with one conditional UPDATE (`WHERE status IN` the allowed sources) and raises `InvalidTransition` otherwise. Leads from routes 1 and 2 (no draft) go `acknowledged → done`; a classifier failure goes `new → acknowledged`. `sent` and `rejected` replies are final; a `failed` reply may be resent or fail again.
+Added in 4a: this flow, and the reply statuses, are enforced by `LEAD_TRANSITIONS` / `REPLY_TRANSITIONS` in `db/models.py`; the repository changes a status with one conditional UPDATE (`WHERE status IN` the allowed sources) and raises `InvalidTransition` otherwise. Leads from routes 1 and 2 (no draft) go `acknowledged → done`; a classifier failure goes `new → acknowledged`. `sent` and `rejected` replies are final. Since 4b every send starts with a claim (`-> sending`, committed before the email goes out); `sending` ends as `sent` or `failed`, and a `failed` reply is resent by claiming it again.
 
 `ai_body` vs `body` yields "% drafts approved unchanged"; `created_at` vs `sent_at` yields reply latency. The dashboard shows both.
 
