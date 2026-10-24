@@ -67,10 +67,12 @@ class _Run:
     def add_cost(self, result) -> None:
         self.cost += result.cost_usd or 0.0
 
+    # The log gets the event name only: the detail can quote the message (a guardrail violation
+    # lists the offending link, an API error may repeat its input), and logs must not hold personal
+    # data. The full text stays in result.events, which the eval and try scripts print locally.
     def event(self, kind: str, detail: str) -> None:
-        text = f"{kind}: {detail}"
-        log.warning(text)
-        self.events.append(text)
+        log.warning("pipeline event: %s", kind)
+        self.events.append(f"{kind}: {detail}")
 
 
 def process_inquiry(
