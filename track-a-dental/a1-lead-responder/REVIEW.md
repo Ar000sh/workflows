@@ -215,8 +215,10 @@ Spec: `docs/superpowers/specs/2026-10-24-a1-layer-4b-intake-and-sender-design.md
      ▼                                                                  ▼
  record: sent · failed (class name only) · stays "sending" (unknown)    Mailpit (dev) / real SMTP (prod)
 
- scheduler ──► scripts/run_sweep.py ──► ReplyService.sweep: stuck acknowledgments (resend, capped),
-                                         first replies left "drafted" (send), leads with no first reply (fallback)
+ scheduler ──► scripts/run_sweep.py ──► ReplyService.sweep: stuck acknowledgments (resend, capped; also
+                                         ones a broken sweep left "failed"), stuck auto-replies (flag only),
+                                         first replies left "drafted" (send), leads with no first reply (fallback);
+                                         each item on its own (one that raises: logged, flagged, counted, skipped)
 ```
 
 **The pieces, one line each:**
@@ -228,7 +230,7 @@ Spec: `docs/superpowers/specs/2026-10-24-a1-layer-4b-intake-and-sender-design.md
 - **`sender.py` (`SmtpSender`)**: one email over SMTP with a typed result and the retry policy (spec section 7).
 - **`repository.py`**: gained `acknowledge_lead`, `suppress_lead`, `flag_for_review`, `fail_stuck_reply`, the count and sweep queries, and lost its input validation (now in `LeadIn`).
 - **Migration `e93e6e744ccc_sending_claim.py`**: reply status `sending`, `replies.claimed_at`, `replies.send_attempts`, `leads.send_suppressed`, `leads.mailbox_key` (with its index).
-- **`scripts/run_sweep.py`**: the unit a scheduler runs, same shape as `run_retention.py`.
+- **`scripts/run_sweep.py`**: the unit a scheduler runs, same shape as `run_retention.py`; prints every count and exits 1 when an item raised.
 
 **Concepts practiced:** service layer (one rule, one layer); claim before send, also called the outbox pattern (the database decides who may send before the email leaves, because an email cannot be taken back); compare-and-set (a conditional UPDATE that only one session wins); a typed result instead of exceptions (three outcomes need three different recordings); background work after the HTTP answer; an idempotent scheduled job; rate limiting on a normalized key.
 
@@ -249,16 +251,18 @@ Spec: `docs/superpowers/specs/2026-10-24-a1-layer-4b-intake-and-sender-design.md
 | `Repository` | `replies_for(lead_id)` | All replies of a lead, oldest first |
 | `Repository` | `count_leads_for_mailbox_since(mailbox_key, since)` / `count_leads_since(since)` | Counts for the per-email limit and the global AI cap |
 | `Repository` | `stuck_sending_replies(*, kind, claimed_before, max_attempts)` | Sweep part 1: replies of one kind stuck in `sending` |
+| `Repository` | `failed_stuck_replies(*, kind, error, claimed_before, max_attempts)` | Sweep part 1: replies the sweep itself moved to `failed` (error = `STUCK_ERROR`) but could not claim again; same age rule and attempt cap |
+| `Repository` | `unflagged_leads_with_stuck_replies(*, kind, claimed_before)` | Leads whose reply of one kind is stuck in `sending` and that are not flagged yet (the sweep flags stuck auto-replies, never resends them) |
 | `Repository` | `stale_drafted_first_replies(*, created_before)` | Sweep part 1b: acknowledgments and auto-replies written but never claimed |
 | `Repository` | `leads_without_first_reply(*, created_before)` | Sweep part 2: leads still waiting for a first reply, not suppressed, not anonymized |
 | `Repository` | `anonymize_older_than(*, cutoff, now, batch_size=5000)` | DSGVO retention in batches (4a, now also blanks `mailbox_key`) |
 | `ReplyService` | `send(reply_id) -> SendOutcome` | Claims, sends, records; `SENT`, `FAILED`, `IN_DOUBT` (stays `sending`), `ALREADY_HANDLED` (lost the claim or not sendable now), `REFUSED` (no address, or a draft not approved) |
 | `ReplyService` | `acknowledge_with_fallback(lead_id) -> bool` | Writes and sends the fixed DE+EN acknowledgment with emergency numbers, flags the lead; `False` if the lead already has a first reply or is suppressed |
-| `ReplyService` | `sweep() -> SweepResult` | The scheduled clean-up; returns `retried_acknowledgments`, `fallback_acknowledgments`, `left_for_staff`, `sent_stale_drafted` |
+| `ReplyService` | `sweep() -> SweepResult` | The scheduled clean-up; returns `retried_acknowledgments`, `fallback_acknowledgments`, `left_for_staff`, `sent_stale_drafted`, `errors` (items that raised: logged, lead flagged, skipped), `flagged_stuck_auto_replies` |
 | `IntakeService` | `receive(lead: LeadIn) -> Received or None` | Saves the lead and applies the per-email limit while the form waits; `None` = duplicate; `Received(lead_id, run_pipeline)` |
 | `IntakeService` | `process(lead_id) -> None` | The background part: AI cap, slot, pipeline under the deadline, writing the result, sending first replies; never raises |
 | `IntakeService` | `shutdown()` | Waits for running pipelines and stops the worker threads (app shutdown) |
-| `SmtpSender` | `send(*, to, subject, body) -> SendResult` | One email: `ACCEPTED`, `FAILED` (after 3 retries on refusals; detail = class name) or `TIMEOUT` (never retried); refuses CR/LF in recipient or subject |
+| `SmtpSender` | `send(*, to, subject, body) -> SendResult` (constructor takes `local_hostname`, default `localhost`) | One email: `ACCEPTED`, `FAILED` (after 3 retries on refusals; detail = class name) or `TIMEOUT` (never retried); refuses CR/LF in recipient or subject |
 
 Other entry points: `create_app(*, intake, max_body_bytes, cors_origins)` and `build_app()` (`api/main.py`, `app` for uvicorn), `scripts/run_sweep.main()`, `limits.mailbox_key(email)`, `LeadIn`.
 
@@ -290,8 +294,16 @@ From the build ledger (`.superpowers/sdd/2026-10-24-a1-layer-4b-intake-and-sende
 - [ ] **Ruling 5:** `SmtpSender` judges an error by its stage: before `send_message` (connect, EHLO, STARTTLS, login) a refusal, disconnect or auth error is FAILED and retried; a timeout at any stage is TIMEOUT at once, never retried (also a connect timeout, which keeps a draft waiting for staff); during `send_message` a server refusal (4xx/5xx, recipients refused) is FAILED and retried, a dropped connection or other OSError is TIMEOUT. *If wrong:* more in-doubt replies than necessary, never a duplicate.
 - [ ] **Ruling 6:** auth errors and permanent 5xx are still retried 3 times, as A1 spec section 7 and the plan's test require (see "to decide" above). *If wrong:* provider lockout risk.
 - [ ] **Ruling 7:** the send rule by kind is checked before the no-address refusal, and a `drafted` staff draft is left untouched on refusal (moving it to `failed` would have made it sendable without approval); `send` returns `ALREADY_HANDLED` for a reply in `sending` (only the claim's owner may move its own claim to `failed`). *If wrong:* an unapproved draft could become sendable, so keep this one.
-- [ ] **Ruling 8:** two sweep weaknesses are parked, not fixed (one poison item can stop a sweep run; a crash between `fail_stuck_reply` and the re-claim leaves an acknowledgment `failed`). *If wrong:* one lost acknowledgment in a tiny crash window, seen by staff only through the dashboard. The attack pass or the final review may decide to fix them before merge.
+- [ ] **Ruling 8:** two sweep weaknesses are parked, not fixed (one poison item can stop a sweep run; a crash between `fail_stuck_reply` and the re-claim leaves an acknowledgment `failed`). *If wrong:* one lost acknowledgment in a tiny crash window, seen by staff only through the dashboard. The attack pass or the final review may decide to fix them before merge. **Superseded by ruling 10: both FIXED.**
+- [ ] **Ruling 10 (final review, I-1):** the sweep runs every item inside its own try/except (class name and id logged, lead flagged best effort, counted in `SweepResult.errors`, the run goes on; `run_sweep` exits 1), and part 1 also resends acknowledgments left `failed` with the sweep's own error `stuck: retried by sweep`, below `MAX_SEND_ATTEMPTS` and claimed before the same cutoff. Plus: stuck auto-replies flag their lead (never resent), `SmtpSender` passes `local_hostname`. *If wrong:* a little extra sweep code; the happy path is unchanged. Small leftover: if two sweeps both read such a `failed` acknowledgment and the first one's resend ends `failed` with a provider error, the second may still claim and try it once more (known not sent before, so never a duplicate; the attempt cap still holds).
 - [ ] **Ruling 9:** both a local fix (`process` always tries to send a first reply it has written, even when a later step raised) and a sweep step 1b (first replies still `drafted` after `NO_REPLY_SWEEP_MINUTES` are sent through `send`, which claims; staff drafts never) so that no patient is left without a reply. *If wrong:* one extra query and its tests.
+
+### Go-live gate (must be true before a real practice uses the form)
+- [ ] **The sweep (and retention) are scheduled.** Without the sweep the "never left without a reply" safety net does not run at all: a deploy or restart kills the background tasks of the leads in flight, and only the sweep answers them. Retention is a DSGVO duty. Alert on `run_sweep` exit code 1.
+- [ ] **The parked global email cap, per-IP limits and a captcha are done** before the form is on a public site (Parked: 4b, first item; A1 spec section 12).
+- [ ] **Accept or change the per-mailbox cap's blind spot:** a real patient's 4th post within the hour is saved but gets no email, and only a staff flag shows it; the 4d dashboard that would show the flag is not built yet.
+- [ ] **Threads under an SMTP slowdown:** fallback and acknowledgment sends run in the web server's pool of about 40 worker threads; a flood of posts while SMTP is slow (up to 10 s timeout and 7 s of retry waits per mail) can queue ordinary posts behind them.
+- [ ] **Non-ASCII (IDN) addresses:** an address like `anna@müller.de` passes the form but the send ends in doubt (`sending`) and is retried pointlessly up to the cap. Decide: refuse non-ASCII addresses in `LeadIn`, or send with SMTPUTF8.
 
 ### Carry into the 4c/4d plans (from the 4b build)
 - **4d must provide staff actions** on top of `set_reply_status` (each with auth and an audit row from 4c): resolve a stuck `sending` reply (`sending -> sent` "confirmed delivered" or `sending -> failed` "not delivered"), resend a `failed` reply (through `ReplyService.send`, which claims), approve and reject drafts. Show `InvalidTransition` / `ALREADY_HANDLED` as "already handled".
@@ -303,13 +315,13 @@ From the build ledger (`.superpowers/sdd/2026-10-24-a1-layer-4b-intake-and-sende
 ### Parked: 4b
 - **Global cap on emails sent per hour (4b probe P4, parked 2026-10-24, Tariq).** The per-mailbox cap does not stop one visitor from sending each of many different victims one fixed acknowledgment (a low-grade mail relay for the acknowledgment text and the sanitized name). Idea: `MAX_EMAILS_PER_HOUR` (default about 120); above it the lead is saved, flagged and `send_suppressed`, no email. Take it up before the form is on a real public site, together with the per-IP limits and captcha deferred in A1 section 12.
 - **Cancellable LLM calls.** A pipeline run that outlives its 45 s deadline keeps running and spends its few cents; making `shared/llm.py` cancellable would stop that (4b spec, section 4).
-- **Sweep has no per-item catch-all:** one poison item (a reply or lead whose processing raises) stops the run, and does so on every run, starving the rest. Idea: try/except per item, an `errors` count in `SweepResult`, exit code 1 from `run_sweep` so the scheduler alerts (ruling 8).
-- **Crash window in sweep part 1:** between `fail_stuck_reply`'s commit and the re-claim the acknowledgment is `failed` and the lead maybe not flagged; a crash there leaves it for staff, and the sweep does not retry `failed` (ruling 8).
+- **FIXED (final 4b fix wave, ruling 10): Sweep has no per-item catch-all:** one poison item (a reply or lead whose processing raises) stopped the run, on every run, starving the rest. Now every item has its own try/except, `SweepResult.errors` counts them and `run_sweep` exits 1.
+- **FIXED (final 4b fix wave, ruling 10): Crash window in sweep part 1:** between `fail_stuck_reply`'s commit and the re-claim the acknowledgment was `failed`, maybe unflagged, and never retried. Now the next sweep resends acknowledgments `failed` with `stuck: retried by sweep` (below `MAX_SEND_ATTEMPTS`), and a raising re-send flags the lead.
 - **Intake crash between saving a lead and `suppress_lead`** (or the count failing): the lead stays unsuppressed and the sweep later sends ONE fallback acknowledgment past the per-email limit. Proper fix: count and suppress inside the create transaction.
 - **`process()` has no guard at its top** for suppressed or not-`new` leads: a buggy caller or a late task could spend API money (the writes are still refused).
 - **No index on `replies(status, created_at)`** for `stale_drafted_first_replies` and the first-reply queries; fine at practice volume.
 - **Retention leaves an anonymized lead's `drafted` first reply `drafted` forever:** harmless (it is never sent, the sweep query skips anonymized leads), but the row is never closed.
-- **SMTP details:** `SMTPNotSupportedError` raised inside `send_message` is classed in doubt (arguably failed). No `Date` or `Message-ID` headers (a Message-ID derived from the reply id would let receivers drop exact duplicates from a sweep retry). smtplib calls `socket.getfqdn()` for EHLO on every connection, which took about 1 s per email on this Windows machine (the end-to-end tests patch it); pass `local_hostname` once in `SmtpSender`.
+- **SMTP details:** `SMTPNotSupportedError` raised inside `send_message` is classed in doubt (arguably failed). No `Date` or `Message-ID` headers (a Message-ID derived from the reply id would let receivers drop exact duplicates from a sweep retry). FIXED (final 4b fix wave): smtplib called `socket.getfqdn()` for EHLO on every connection (about 1 s per email on this Windows machine); `SmtpSender` now passes `local_hostname` (`SMTP_LOCAL_HOSTNAME`, default `localhost`).
 - **Subject language** comes from `lead.language` at send time, not stored on the reply. A whitespace-only phone is stored as `""`, not `None`.
 - **API hardening:** `_BodyTooLarge` derives from `BaseException` (works, but depends on FastAPI's body-reading internals; a Starlette `HTTPException(413)` would be sturdier); a connection-pool timeout should answer 503 (today 500); reject `CORS_ORIGINS=*`; a lower bound for `MAX_BODY_BYTES` (a tiny value refuses every lead).
 - **`shared/llm.py` log lines** include the API error message and `repr` of exceptions (`LLM attempt failed: ...`). Anthropic's errors do not normally quote the prompt, and the prompt is the redacted message, but for a strict "ids only" rule log the status code and class name there too (it is shared code, so it was left for a separate change).

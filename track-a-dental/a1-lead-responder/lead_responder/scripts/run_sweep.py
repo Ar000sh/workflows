@@ -1,7 +1,7 @@
 """Scheduled job: resend stuck acknowledgments, send first replies that were written but never
 sent, and acknowledge leads that got no reply.
 
-Run:  uv run python -m lead_responder.scripts.run_sweep
+Run:  uv run python -m lead_responder.scripts.run_sweep   (exit code 1 when an item raised)
 Meant to run every few minutes from a scheduler (chosen with the deployment layer). Safe to run
 any number of times, also two at once: each stuck reply and each lead gets at most one email.
 """
@@ -19,14 +19,17 @@ from lead_responder.services.replies import ReplyService  # noqa: E402
 
 
 # Wires the real pieces (Postgres, SMTP from config, the practice file) into one ReplyService,
-# runs one sweep and prints its four counts. MAIL_FROM empty means the practice sends as itself;
+# runs one sweep and prints all its counts. MAIL_FROM empty means the practice sends as itself;
 # replies from patients go to the practice address either way.
+# Exit code 1 when any item raised (the counts are printed first): the sweep went on past it, but
+# a scheduler should alert, because the same item will likely fail again on the next run.
 def main() -> int:
     practice = load_practice()
     sender = SmtpSender(
         host=config.SMTP_HOST, port=config.SMTP_PORT, from_addr=config.MAIL_FROM or practice.email,
         reply_to=practice.email, starttls=config.SMTP_STARTTLS, user=config.SMTP_USER,
         password=config.SMTP_PASSWORD, timeout=config.SMTP_TIMEOUT_SECONDS,
+        local_hostname=config.SMTP_LOCAL_HOSTNAME,
     )
     service = ReplyService(
         session_factory=make_session_factory(make_engine(config.DATABASE_URL)), sender=sender,
@@ -37,9 +40,10 @@ def main() -> int:
         f"Retried {result.retried_acknowledgments} stuck acknowledgment(s), sent "
         f"{result.sent_stale_drafted} unsent first reply(ies), sent "
         f"{result.fallback_acknowledgments} fallback acknowledgment(s), left "
-        f"{result.left_for_staff} for staff."
+        f"{result.left_for_staff} for staff, flagged {result.flagged_stuck_auto_replies} lead(s) with a "
+        f"stuck auto-reply, {result.errors} error(s)."
     )
-    return 0
+    return 1 if result.errors > 0 else 0
 
 
 if __name__ == "__main__":

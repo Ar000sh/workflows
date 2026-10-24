@@ -25,10 +25,12 @@ def fake_smtp(monkeypatch, script, stage="connect", exit_error=None):
 
     class FakeSMTP:
         attempts: list = []
+        local_hostnames: list = []
         sent: list = []
 
-        def __init__(self, host, port, timeout):
+        def __init__(self, host, port, local_hostname=None, timeout=None):
             FakeSMTP.attempts.append({"host": host, "port": port, "timeout": timeout})
+            FakeSMTP.local_hostnames.append(local_hostname)
             self.error = script.pop(0) if script else None
             if self.error is not None and stage == "connect":
                 raise self.error
@@ -81,6 +83,15 @@ def test_accepted_mail_returns_accepted_and_builds_plain_text_message(monkeypatc
     assert msg.get_content_type() == "text/plain"
     assert msg.get_content_charset() == "utf-8"
     assert msg.get_content().rstrip("\n") == BODY
+
+
+# smtplib.SMTP without local_hostname calls socket.getfqdn() for its EHLO name, which can take
+# about a second per connection; the sender always passes a fixed name ("localhost" by default).
+def test_local_hostname_is_passed_to_smtp(monkeypatch):
+    smtp = fake_smtp(monkeypatch, [None, None])
+    make_sender().send(to=TO, subject=SUBJECT, body=BODY)
+    make_sender(local_hostname="praxis.example").send(to=TO, subject=SUBJECT, body=BODY)
+    assert smtp.local_hostnames == ["localhost", "praxis.example"]
 
 
 def test_refused_connection_is_retried_three_times_with_1_2_4_second_waits_then_failed(monkeypatch):

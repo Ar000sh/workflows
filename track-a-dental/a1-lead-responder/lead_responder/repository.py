@@ -422,6 +422,49 @@ class Repository:
             .order_by(Reply.id)
         )
 
+    # Sweep part 1, second list: replies of one kind that the sweep itself moved sending -> failed
+    # (their error is exactly `error`, the sweep's fixed STUCK_ERROR text) but never managed to
+    # claim again: the re-send raised or the process died right after fail_stuck_reply committed.
+    # Same age rule as stuck_sending_replies (claimed_at strictly before `claimed_before`) and the
+    # same attempt cap, which is what stops an endless retry. Any other error text means a known
+    # refusal for staff to look at, so it is not selected. A plain read, no lock: the sweep resends
+    # each through send(), whose claim (failed -> sending, a conditional write) lets one sweep win.
+    def failed_stuck_replies(
+        self, *, kind: Action, error: str, claimed_before: datetime, max_attempts: int,
+    ) -> list[Reply]:
+        if not isinstance(kind, Action):
+            raise ValueError(f"kind must be an Action, got {kind!r}")
+        _require_aware("claimed_before", claimed_before)
+        return self._read_all(
+            select(Reply)
+            .where(
+                Reply.kind == kind.value, Reply.status == ReplyStatus.FAILED.value,
+                Reply.error == error, Reply.claimed_at < claimed_before,
+                Reply.send_attempts < max_attempts,
+            )
+            .order_by(Reply.id)
+        )
+
+    # Leads with a reply of one kind stuck in "sending" (claimed strictly before `claimed_before`)
+    # that are not on the staff review list yet. The sweep flags them and never resends: for an
+    # auto-reply a second copy of a medical text is not harmless. "Not flagged yet" keeps a lead
+    # from being counted again on every run. A plain read, no lock: flagging is idempotent.
+    def unflagged_leads_with_stuck_replies(self, *, kind: Action, claimed_before: datetime) -> list[Lead]:
+        if not isinstance(kind, Action):
+            raise ValueError(f"kind must be an Action, got {kind!r}")
+        _require_aware("claimed_before", claimed_before)
+        stuck = (
+            select(Reply.id)
+            .where(
+                Reply.lead_id == Lead.id, Reply.kind == kind.value,
+                Reply.status == ReplyStatus.SENDING.value, Reply.claimed_at < claimed_before,
+            )
+            .exists()
+        )
+        return self._read_all(
+            select(Lead).where(Lead.needs_manual_review.is_(False), stuck).order_by(Lead.id)
+        )
+
     # Sweep part 2: leads created before `created_before` (strictly) that are still waiting for a
     # first reply (new, classified or acknowledged), not suppressed on purpose, not anonymized, and
     # with no acknowledgment or auto-reply. A plain read, no lock: the sweep acts on each through

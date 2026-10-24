@@ -109,13 +109,26 @@ def test_stuck_draft_is_never_touched(session, engine, practice):
     assert sender.calls == []
 
 
-def test_stuck_auto_reply_is_never_touched(session, engine, practice):
+# Never resent, but its lead is flagged so staff see it (M-2), and only once: a second sweep finds
+# the lead already flagged.
+def test_stuck_auto_reply_is_never_resent_only_flagged(session, engine, practice):
     repo = Repository(session)
-    _, reply = stuck_reply(repo, kind=Action.AUTO_REPLY)
+    lead, reply = stuck_reply(repo, kind=Action.AUTO_REPLY)
     sender = FakeSender()
-    assert make_service(engine, practice, sender).sweep() == SweepResult(0, 0, 0)
+    service = make_service(engine, practice, sender)
+    assert service.sweep() == SweepResult(0, 0, 0, flagged_stuck_auto_replies=1)
+    assert service.sweep() == SweepResult(0, 0, 0)
     assert (repo.get_reply(reply.id).status, repo.get_reply(reply.id).send_attempts) == ("sending", 1)
+    assert repo.get_lead(lead.id).needs_manual_review is True
     assert sender.calls == []
+
+
+# A young auto-reply claim (within the timeout, or exactly at it) may still be in flight: no flag.
+def test_young_stuck_auto_reply_is_not_flagged(session, engine, practice):
+    repo = Repository(session)
+    lead, _ = stuck_reply(repo, kind=Action.AUTO_REPLY, claimed_ago=timedelta(minutes=10))
+    assert make_service(engine, practice, FakeSender()).sweep() == SweepResult(0, 0, 0)
+    assert repo.get_lead(lead.id).needs_manual_review is False
 
 
 # The boundary: a claim EXACTLY 10 minutes old is not stuck yet. "Stuck" means strictly older than
@@ -381,3 +394,157 @@ def test_stale_drafted_reply_of_anonymized_lead_is_skipped(session, engine, prac
     assert make_service(engine, practice, sender).sweep() == SweepResult(0, 0, 0, 0)
     assert sender.calls == []
     assert repo.get_reply(reply.id).status == "drafted"
+
+
+# --- a failing item never stops the sweep; an acknowledgment the sweep left "failed" is retried ---
+
+# Raises for the given reply ids (send) or lead ids (acknowledge_with_fallback), like a database
+# blip or a bug in one item; every other id goes through the real method.
+def raise_for(monkeypatch, *, reply_ids=(), lead_ids=()):
+    original_send, original_fallback = ReplyService.send, ReplyService.acknowledge_with_fallback
+
+    def send(self, reply_id):
+        if reply_id in reply_ids:
+            raise RuntimeError("database blip")
+        return original_send(self, reply_id)
+
+    def fallback(self, lead_id):
+        if lead_id in lead_ids:
+            raise RuntimeError("database blip")
+        return original_fallback(self, lead_id)
+
+    monkeypatch.setattr(ReplyService, "send", send)
+    monkeypatch.setattr(ReplyService, "acknowledge_with_fallback", fallback)
+
+
+# Final review I-1: the first item of each part raises. The sweep does not raise, still handles
+# the second item of every part, flags the leads of the failed items, and counts the errors.
+def test_a_raising_item_does_not_stop_the_sweep(session, engine, practice, monkeypatch):
+    repo = Repository(session)
+    bad_stuck_lead, bad_stuck = stuck_reply(repo, email="p1@example.com")
+    _, good_stuck = stuck_reply(repo, email="p2@example.com")
+    bad_stale_lead, bad_stale = drafted_first_reply(repo, email="p3@example.com")
+    _, good_stale = drafted_first_reply(repo, email="p4@example.com")
+    bad_lead = make_lead(repo, email="p5@example.com", age=STALE)
+    good_lead = make_lead(repo, email="p6@example.com", age=STALE)
+    raise_for(monkeypatch, reply_ids={bad_stuck.id, bad_stale.id}, lead_ids={bad_lead.id})
+    sender = FakeSender()
+    result = make_service(engine, practice, sender).sweep()
+    assert result == SweepResult(1, 1, 0, 1, errors=3)
+    assert sorted(c["to"] for c in sender.calls) == ["p2@example.com", "p4@example.com", "p6@example.com"]
+    assert [repo.get_reply(r.id).status for r in (good_stuck, good_stale)] == ["sent", "sent"]
+    for lead in (bad_stuck_lead, bad_stale_lead, bad_lead):
+        assert repo.get_lead(lead.id).needs_manual_review is True
+    assert repo.replies_for(good_lead.id)[0].status == "sent"
+
+
+# The flag in the except is best effort: if flagging fails too, the sweep still goes on.
+def test_failed_flag_after_a_raising_item_does_not_stop_the_sweep(session, engine, practice, monkeypatch):
+    repo = Repository(session)
+    _, bad = stuck_reply(repo, email="p1@example.com")
+    _, good = stuck_reply(repo, email="p2@example.com")
+    raise_for(monkeypatch, reply_ids={bad.id})
+
+    def broken_flag(self, lead_id):
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(Repository, "flag_for_review", broken_flag)
+    sender = FakeSender()
+    assert make_service(engine, practice, sender).sweep() == SweepResult(1, 0, 0, errors=1)
+    assert [c["to"] for c in sender.calls] == ["p2@example.com"]
+
+
+# The crash window: fail_stuck_reply committed "failed" and then the re-send raised (or the process
+# died). The acknowledgment is "failed" with the sweep's own error text. The next sweep claims it
+# again and sends it once; a third sweep finds nothing.
+def test_acknowledgment_left_failed_by_a_broken_sweep_is_retried_next_time(session, engine, practice, monkeypatch):
+    repo = Repository(session)
+    _, reply = stuck_reply(repo)
+    raise_for(monkeypatch, reply_ids={reply.id})
+    assert make_service(engine, practice, FakeSender()).sweep() == SweepResult(0, 0, 0, errors=1)
+    got = repo.get_reply(reply.id)
+    assert (got.status, got.error, got.send_attempts) == ("failed", STUCK_ERROR, 1)
+    monkeypatch.undo()
+    sender = FakeSender()
+    service = make_service(engine, practice, sender)
+    assert service.sweep() == SweepResult(1, 0, 0)
+    assert service.sweep() == SweepResult(0, 0, 0)
+    got = repo.get_reply(reply.id)
+    assert (got.status, got.error, got.send_attempts) == ("sent", None, 2)
+    assert [c["to"] for c in sender.calls] == [EMAIL]
+
+
+# The same state, built directly: a stuck acknowledgment the sweep failed (STUCK_ERROR) is resent.
+def test_failed_with_stuck_error_is_resent(session, engine, practice):
+    repo = Repository(session)
+    _, reply = stuck_reply(repo)
+    repo.fail_stuck_reply(reply.id, claimed_before=NOW, error=STUCK_ERROR)
+    sender = FakeSender()
+    assert make_service(engine, practice, sender).sweep() == SweepResult(1, 0, 0)
+    assert repo.get_reply(reply.id).status == "sent"
+    assert len(sender.calls) == 1
+
+
+# A "failed" acknowledgment with any other error (the provider refused it, known not sent) is for
+# staff to resend in 4d; one at the attempt cap is left alone too, so the retry cannot loop.
+def test_failed_with_other_error_or_at_cap_is_untouched(session, engine, practice):
+    repo = Repository(session)
+    _, refused = stuck_reply(repo, email=EMAIL)
+    repo.set_reply_status(refused.id, ReplyStatus.FAILED, now=NOW - STUCK, error="SMTPRecipientsRefused")
+    _, capped = stuck_reply(repo, email=OTHER, attempts=3)
+    repo.fail_stuck_reply(capped.id, claimed_before=NOW, error=STUCK_ERROR)
+    sender = FakeSender()
+    assert make_service(engine, practice, sender).sweep() == SweepResult(0, 0, 0)
+    assert sender.calls == []
+    assert [(repo.get_reply(r.id).status, repo.get_reply(r.id).send_attempts) for r in (refused, capped)] == [
+        ("failed", 1), ("failed", 3),
+    ]
+
+
+# A young claim that ended "failed" with STUCK_ERROR (claimed_at within the timeout) waits: the age
+# rule is the same as for "sending" (claimed_at strictly before now - SENDING_TIMEOUT_MINUTES).
+def test_failed_with_stuck_error_but_young_claim_waits(session, engine, practice):
+    repo = Repository(session)
+    _, reply = stuck_reply(repo, claimed_ago=timedelta(minutes=10))
+    repo.fail_stuck_reply(reply.id, claimed_before=NOW, error=STUCK_ERROR)
+    sender = FakeSender()
+    assert make_service(engine, practice, sender).sweep() == SweepResult(0, 0, 0)
+    assert sender.calls == []
+
+
+# Two sweeps read the same failed-by-sweep acknowledgment before either acts; send()'s claim
+# (failed -> sending, a conditional write) lets one of them send.
+def test_two_overlapping_sweeps_resend_a_failed_by_sweep_acknowledgment_once(session, engine, practice, monkeypatch):
+    repo = Repository(session)
+    _, reply = stuck_reply(repo)
+    repo.fail_stuck_reply(reply.id, claimed_before=NOW, error=STUCK_ERROR)
+    read_both = threading.Barrier(2, timeout=10)
+    original = Repository.failed_stuck_replies
+
+    def read_then_wait(self, **kwargs):
+        rows = original(self, **kwargs)
+        read_both.wait()
+        return rows
+
+    monkeypatch.setattr(Repository, "failed_stuck_replies", read_then_wait)
+    sender = FakeSender(delay=0.2)
+    service = make_service(engine, practice, sender)
+    results, errors = [], []
+
+    def worker():
+        try:
+            results.append(service.sweep())
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    monkeypatch.undo()
+    assert errors == []
+    assert len(sender.calls) == 1
+    assert sum(r.retried_acknowledgments for r in results) == 1
+    assert sum(r.errors for r in results) == 0
+    assert repo.get_reply(reply.id).send_attempts == 2

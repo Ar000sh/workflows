@@ -26,6 +26,9 @@ SMTP_STARTTLS = os.environ.get("SMTP_STARTTLS", "false").strip().lower() in ("1"
 SMTP_USER = os.environ.get("SMTP_USER") or None
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD") or None
 SMTP_TIMEOUT_SECONDS = float(os.environ.get("SMTP_TIMEOUT_SECONDS", "10"))
+# The name our side gives in the SMTP greeting (EHLO). Fixed, because without it smtplib looks up
+# this machine's full DNS name on every connection, which can take about a second.
+SMTP_LOCAL_HOSTNAME = os.environ.get("SMTP_LOCAL_HOSTNAME", "localhost")
 MAIL_FROM = os.environ.get("MAIL_FROM", "")
 
 # Layer 4b: intake limits (services/intake.py). Per mailbox: more than _HOUR leads in the last hour
@@ -40,7 +43,8 @@ MAX_CONCURRENT_PIPELINES = int(os.environ.get("MAX_CONCURRENT_PIPELINES", "10"))
 PIPELINE_DEADLINE_SECONDS = float(os.environ.get("PIPELINE_DEADLINE_SECONDS", "45"))
 
 # Layer 4b: the sweep (scripts/run_sweep.py). An acknowledgment claimed longer than
-# SENDING_TIMEOUT_MINUTES ago with no result is resent, at most MAX_SEND_ATTEMPTS claims in all;
+# SENDING_TIMEOUT_MINUTES ago with no result is resent, at most MAX_SEND_ATTEMPTS claims in all
+# (an auto-reply stuck that long is never resent, its lead is only flagged for staff);
 # a first reply left "drafted" (never claimed) longer than NO_REPLY_SWEEP_MINUTES is sent, and a
 # lead older than NO_REPLY_SWEEP_MINUTES with no first reply gets the fallback acknowledgment.
 SENDING_TIMEOUT_MINUTES = int(os.environ.get("SENDING_TIMEOUT_MINUTES", "10"))

@@ -35,6 +35,7 @@ def build_app() -> FastAPI:
         host=config.SMTP_HOST, port=config.SMTP_PORT, from_addr=config.MAIL_FROM or practice.email,
         reply_to=practice.email, starttls=config.SMTP_STARTTLS, user=config.SMTP_USER,
         password=config.SMTP_PASSWORD, timeout=config.SMTP_TIMEOUT_SECONDS,
+        local_hostname=config.SMTP_LOCAL_HOSTNAME,
     )
     session_factory = make_session_factory(make_engine(config.DATABASE_URL))
     clock = lambda: datetime.now(timezone.utc)  # noqa: E731

@@ -189,7 +189,7 @@ def test_send_error_text_holds_no_address(engine, session, practice, caplog, mon
     address = f"{EMAIL_CANARY}refused@example.com"
 
     class RefusingSMTP:
-        def __init__(self, host, port, timeout):
+        def __init__(self, host, port, local_hostname=None, timeout=None):
             pass
 
         def __enter__(self):

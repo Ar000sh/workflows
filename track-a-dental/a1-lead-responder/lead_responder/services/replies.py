@@ -18,11 +18,17 @@ leaves, because nothing can take an email back afterwards.
 sweep() is the scheduled clean-up (spec section 6 "Sweep", run by scripts/run_sweep.py):
   1. acknowledgments stuck in "sending" (claimed over SENDING_TIMEOUT_MINUTES ago): sending ->
      failed, then send() again, up to MAX_SEND_ATTEMPTS claims; at the cap they wait for staff.
-     Drafts and auto-replies in "sending" are never resent: a duplicate medical reply is not harmless
+     Also acknowledgments a previous sweep moved to "failed" (error STUCK_ERROR) but could not
+     claim again (the re-send raised or the process died in between): send() them, same cap.
+     Drafts and auto-replies in "sending" are never resent: a duplicate medical reply is not
+     harmless. A stuck auto-reply only flags its lead, so staff see it
   1b. acknowledgments and auto-replies still "drafted" (written, never claimed: the writer died
      or the database failed before the send) and older than NO_REPLY_SWEEP_MINUTES: send() them.
      Never a staff draft (kind "draft"): it waits for approval
   2. leads older than NO_REPLY_SWEEP_MINUTES with no first reply: the fallback acknowledgment
+Each item runs on its own: one that raises is logged (class name and id), its lead is flagged,
+it is counted in SweepResult.errors and the sweep goes on with the next one, so one broken item
+cannot starve all the others on every run. run_sweep.py exits 1 when errors > 0.
 """
 from __future__ import annotations
 
@@ -74,13 +80,16 @@ STUCK_ERROR = "stuck: retried by sweep"
 _NO_ATTEMPT_CAP = 2**31 - 1
 
 
-# What one sweep did, for the script's printout and the tests.
+# What one sweep did, for the script's printout and the tests. The later fields have defaults so
+# the counts can be given by position in their original order.
 @dataclass(frozen=True)
 class SweepResult:
-    retried_acknowledgments: int   # stuck acknowledgments this sweep resent (whatever the new outcome)
+    retried_acknowledgments: int   # stuck (or failed-by-sweep) acknowledgments resent, whatever the new outcome
     fallback_acknowledgments: int  # leads that got the fallback acknowledgment from this sweep
     left_for_staff: int            # stuck acknowledgments at MAX_SEND_ATTEMPTS, not resent
     sent_stale_drafted: int = 0    # first replies left "drafted" (never claimed) that this sweep sent
+    errors: int = 0                # items that raised: logged, lead flagged, skipped; run_sweep exits 1
+    flagged_stuck_auto_replies: int = 0  # leads flagged because their auto-reply is stuck in "sending"
 
 
 # True when the lead has no address to write to: retention blanked it (DSGVO) or it is empty.
@@ -140,46 +149,92 @@ class ReplyService:
     # lock for part 2. Part 1b runs before part 2 and uses the same age, so a lead whose first
     # reply was written but never sent is picked up here (part 2 skips it: a first reply exists). A lead
     # anonymized between the read and the action is skipped (send refuses it, acknowledge_lead
-    # raises ValueError). The reads hold no lock and no transaction while emails go out.
+    # raises ValueError). All lists are read first in one short session; no lock and no
+    # transaction is held while emails go out. Every item then runs through _guarded, so one
+    # that raises is counted and skipped instead of ending the whole run.
     def sweep(self) -> SweepResult:
         now = self._clock()
         stuck_before = now - timedelta(minutes=config.SENDING_TIMEOUT_MINUTES)
+        no_reply_before = now - timedelta(minutes=config.NO_REPLY_SWEEP_MINUTES)
         with self._session_factory() as session:
             repo = Repository(session)
             stuck = repo.stuck_sending_replies(
                 kind=Action.ACKNOWLEDGMENT, claimed_before=stuck_before, max_attempts=_NO_ATTEMPT_CAP,
             )
-            retry = [r.id for r in stuck if r.send_attempts < config.MAX_SEND_ATTEMPTS]
+            retry = [(r.id, r.lead_id) for r in stuck if r.send_attempts < config.MAX_SEND_ATTEMPTS]
             left_for_staff = len(stuck) - len(retry)
-            retried = sum(self._retry_stuck(repo, reply_id, stuck_before) for reply_id in retry)
-            no_reply_before = now - timedelta(minutes=config.NO_REPLY_SWEEP_MINUTES)
-            stale_ids = [r.id for r in repo.stale_drafted_first_replies(created_before=no_reply_before)]
-            leads = repo.leads_without_first_reply(created_before=no_reply_before)
-            lead_ids = [lead.id for lead in leads]
-        sent_stale = sum(self._send_stale(reply_id) for reply_id in stale_ids)
-        fallbacks = sum(self._fallback(lead_id) for lead_id in lead_ids)
-        log.info(
-            "sweep: %s retried, %s stale drafted sent, %s fallback, %s left for staff",
-            retried, sent_stale, fallbacks, left_for_staff,
+            failed_by_sweep = [(r.id, r.lead_id) for r in repo.failed_stuck_replies(
+                kind=Action.ACKNOWLEDGMENT, error=STUCK_ERROR, claimed_before=stuck_before,
+                max_attempts=config.MAX_SEND_ATTEMPTS,
+            )]
+            stuck_auto_leads = [lead.id for lead in repo.unflagged_leads_with_stuck_replies(
+                kind=Action.AUTO_REPLY, claimed_before=stuck_before,
+            )]
+            stale = [(r.id, r.lead_id) for r in repo.stale_drafted_first_replies(created_before=no_reply_before)]
+            lead_ids = [lead.id for lead in repo.leads_without_first_reply(created_before=no_reply_before)]
+        # Each entry: True = done, False = skipped (someone else handled it), None = raised.
+        part1 = [self._guarded("reply", rid, lid, lambda rid=rid: self._retry_stuck(rid, stuck_before))
+                 for rid, lid in retry]
+        part1 += [self._guarded("reply", rid, lid, lambda rid=rid: self._attempted(self.send(rid)))
+                  for rid, lid in failed_by_sweep]
+        flagged = [self._guarded("lead", lid, lid, lambda lid=lid: self._flag(lid)) for lid in stuck_auto_leads]
+        part1b = [self._guarded("reply", rid, lid, lambda rid=rid: self._attempted(self.send(rid)))
+                  for rid, lid in stale]
+        part2 = [self._guarded("lead", lid, lid, lambda lid=lid: self._fallback(lid)) for lid in lead_ids]
+        everything = part1 + flagged + part1b + part2
+        result = SweepResult(
+            retried_acknowledgments=part1.count(True), fallback_acknowledgments=part2.count(True),
+            left_for_staff=left_for_staff, sent_stale_drafted=part1b.count(True),
+            errors=everything.count(None), flagged_stuck_auto_replies=flagged.count(True),
         )
-        return SweepResult(retried, fallbacks, left_for_staff, sent_stale)
+        log.info(
+            "sweep: %s retried, %s stale drafted sent, %s fallback, %s left for staff, "
+            "%s stuck auto-replies flagged, %s errors",
+            result.retried_acknowledgments, result.sent_stale_drafted, result.fallback_acknowledgments,
+            result.left_for_staff, result.flagged_stuck_auto_replies, result.errors,
+        )
+        return result
 
-    # Part 1b for one reply: send() claims it, so of two sweeps only one sends (the other gets
-    # ALREADY_HANDLED). True if an email was attempted.
-    def _send_stale(self, reply_id: int) -> bool:
-        outcome = self.send(reply_id)
+    # Runs one sweep item. Any exception (a database blip, a bug, a poison row) is logged with the
+    # exception CLASS name and the id only (the text could hold an address), the item's lead is
+    # flagged so staff see it, and None tells sweep() to count an error and go on. Why catch
+    # everything here: one item that always raises would otherwise end every run before the
+    # items after it, and the "no patient left without a reply" net would stop for all of them.
+    def _guarded(self, what: str, item_id: int, lead_id: int, action: Callable[[], bool]) -> bool | None:
+        try:
+            return action()
+        except Exception as e:
+            log.error("sweep: %s %s raised %s; lead %s flagged for staff", what, item_id, type(e).__name__, lead_id)
+            try:
+                self._flag(lead_id)
+            except Exception as flag_error:  # best effort: the error is already counted
+                log.error("lead %s: flagging for review failed (%s)", lead_id, type(flag_error).__name__)
+            return None
+
+    # Puts the lead on the staff review list, in its own short session. True for the counts.
+    def _flag(self, lead_id: int) -> bool:
+        with self._session_factory() as session:
+            Repository(session).flag_for_review(lead_id)
+        return True
+
+    # True if send() handed the email to the sender (whatever came back); False if it sent nothing
+    # (another sweep won the claim, or the lead has no address any more).
+    @staticmethod
+    def _attempted(outcome: SendOutcome) -> bool:
         return outcome in (SendOutcome.SENT, SendOutcome.FAILED, SendOutcome.IN_DOUBT)
 
     # Part 1 for one reply: give up the stale claim (InvalidTransition = another sweep or a late
-    # result got there first: skip), then send() claims it again. True if an email was attempted.
-    def _retry_stuck(self, repo: Repository, reply_id: int, stuck_before: datetime) -> bool:
-        try:
-            repo.fail_stuck_reply(reply_id, claimed_before=stuck_before, error=STUCK_ERROR)
-        except InvalidTransition:
-            log.info("reply %s: stuck claim already handled", reply_id)
-            return False
-        outcome = self.send(reply_id)
-        return outcome in (SendOutcome.SENT, SendOutcome.FAILED, SendOutcome.IN_DOUBT)
+    # result got there first: skip), then send() claims it again. If send() raises after the
+    # give-up committed, the reply is "failed" with STUCK_ERROR and the next sweep's
+    # failed_stuck_replies list picks it up. True if an email was attempted.
+    def _retry_stuck(self, reply_id: int, stuck_before: datetime) -> bool:
+        with self._session_factory() as session:
+            try:
+                Repository(session).fail_stuck_reply(reply_id, claimed_before=stuck_before, error=STUCK_ERROR)
+            except InvalidTransition:
+                log.info("reply %s: stuck claim already handled", reply_id)
+                return False
+        return self._attempted(self.send(reply_id))
 
     # Part 2 for one lead. False: another writer gave it a first reply or it was suppressed
     # (acknowledge_with_fallback returns False), or retention anonymized it after the read

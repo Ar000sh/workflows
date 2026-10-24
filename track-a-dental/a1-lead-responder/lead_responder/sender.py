@@ -44,13 +44,15 @@ class Sender(Protocol):
 
 class SmtpSender:
     # Settings come from config.py (SMTP_*) and the practice; `sleep` is injected so tests can
-    # record the retry waits instead of really waiting 7 seconds.
+    # record the retry waits instead of really waiting 7 seconds. local_hostname is our EHLO name:
+    # given, so smtplib does not look up this machine's DNS name (socket.getfqdn, ~1 s) per connection.
     def __init__(
         self, *, host: str, port: int, from_addr: str, reply_to: str, starttls: bool = False,
         user: str | None = None, password: str | None = None, timeout: float = 10.0,
-        sleep: Callable[[float], None] = time.sleep,
+        local_hostname: str = "localhost", sleep: Callable[[float], None] = time.sleep,
     ):
         self.host, self.port, self.timeout = host, port, timeout
+        self.local_hostname = local_hostname
         self.from_addr, self.reply_to = from_addr, reply_to
         self.starttls, self.user, self.password = starttls, user, password
         self._sleep = sleep
@@ -96,7 +98,9 @@ class SmtpSender:
     def _attempt(self, msg: EmailMessage) -> SendResult:
         stage = "setup"
         try:
-            with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as smtp:
+            with smtplib.SMTP(
+                self.host, self.port, local_hostname=self.local_hostname, timeout=self.timeout,
+            ) as smtp:
                 if self.starttls:
                     smtp.starttls()
                 if self.user:
