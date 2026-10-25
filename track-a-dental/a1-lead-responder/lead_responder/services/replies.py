@@ -156,30 +156,59 @@ class ReplyService:
         now = self._clock()
         stuck_before = now - timedelta(minutes=config.SENDING_TIMEOUT_MINUTES)
         no_reply_before = now - timedelta(minutes=config.NO_REPLY_SWEEP_MINUTES)
+        # PHASE A: read every list we need, in one short session that closes before any email goes
+        # out. These are only candidates; each action below re-checks with a conditional write,
+        # so a row another sweep or worker handled meanwhile is skipped, not repeated.
         with self._session_factory() as session:
             repo = Repository(session)
+            # Part 1 candidates: acknowledgments claimed ("sending") more than SENDING_TIMEOUT_MINUTES
+            # ago. A claim that old means the sender crashed or timed out: the outcome is unknown.
+            # Read without an attempt limit, then split here, so one query gives both groups:
+            # `retry` (claimed fewer than MAX_SEND_ATTEMPTS times) is resent; the rest hit the
+            # limit and wait for staff (`left_for_staff`), so a broken mail server cannot make
+            # the sweep email one patient forever.
             stuck = repo.stuck_sending_replies(
                 kind=Action.ACKNOWLEDGMENT, claimed_before=stuck_before, max_attempts=_NO_ATTEMPT_CAP,
             )
             retry = [(r.id, r.lead_id) for r in stuck if r.send_attempts < config.MAX_SEND_ATTEMPTS]
             left_for_staff = len(stuck) - len(retry)
+            # Part 1 leftovers: acknowledgments an earlier sweep already moved to "failed" (its
+            # STUCK_ERROR text) but did not manage to send again, because the process died between
+            # the two steps. Without this list they would sit in "failed" for good.
             failed_by_sweep = [(r.id, r.lead_id) for r in repo.failed_stuck_replies(
                 kind=Action.ACKNOWLEDGMENT, error=STUCK_ERROR, claimed_before=stuck_before,
                 max_attempts=config.MAX_SEND_ATTEMPTS,
             )]
+            # Part 1 for auto-replies: leads whose AI auto-reply is stuck in "sending". Never
+            # resent (a second medical-looking answer is not harmless); we only flag the lead,
+            # skipping leads that are flagged already so the count shows new work only.
             stuck_auto_leads = [lead.id for lead in repo.unflagged_leads_with_stuck_replies(
                 kind=Action.AUTO_REPLY, claimed_before=stuck_before,
             )]
+            # Part 1b: first replies written ("drafted") but never claimed, older than
+            # NO_REPLY_SWEEP_MINUTES. The writer died or the database failed before send() ran.
+            # Staff drafts are not in this list: they wait for approval.
             stale = [(r.id, r.lead_id) for r in repo.stale_drafted_first_replies(created_before=no_reply_before)]
+            # Part 2: leads older than NO_REPLY_SWEEP_MINUTES with no first reply at all (the
+            # server restarted while the pipeline ran). They get the fixed acknowledgment.
             lead_ids = [lead.id for lead in repo.leads_without_first_reply(created_before=no_reply_before)]
-        # Each entry: True = done, False = skipped (someone else handled it), None = raised.
+        # PHASE B: act on each candidate on its own, through _guarded (one that raises is counted
+        # and skipped). Each entry is True = done, False = skipped (someone else handled it) or
+        # None = raised. Parts 1, 1b and 2 are independent of each other and safe in this order:
+        # 1b runs before 2 on the same age, so a lead with a written-but-unsent reply is sent
+        # here and part 2 skips it (a first reply exists).
+        # Part 1: give up the stale claim (sending -> failed), then send() claims it again.
         part1 = [self._guarded("reply", rid, lid, lambda rid=rid: self._retry_stuck(rid, stuck_before))
                  for rid, lid in retry]
+        # Part 1 leftovers: already "failed" by the sweep, so only send() is needed.
         part1 += [self._guarded("reply", rid, lid, lambda rid=rid: self._attempted(self.send(rid)))
                   for rid, lid in failed_by_sweep]
+        # Part 1, auto-replies: flag only, no email.
         flagged = [self._guarded("lead", lid, lid, lambda lid=lid: self._flag(lid)) for lid in stuck_auto_leads]
+        # Part 1b: send the written first replies (send() claims them).
         part1b = [self._guarded("reply", rid, lid, lambda rid=rid: self._attempted(self.send(rid)))
                   for rid, lid in stale]
+        # Part 2: write and send the fixed acknowledgment for leads that have no first reply.
         part2 = [self._guarded("lead", lid, lid, lambda lid=lid: self._fallback(lid)) for lid in lead_ids]
         everything = part1 + flagged + part1b + part2
         result = SweepResult(

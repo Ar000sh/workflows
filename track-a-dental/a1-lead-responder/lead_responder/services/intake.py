@@ -106,6 +106,9 @@ class IntakeService:
             except Exception as e:  # reading the lead or the cap failed
                 log.error("lead %s: preparing the pipeline failed (%s)", lead_id, type(e).__name__)
                 result = None
+
+            # incase the run of the pipeline for the incoming did not work for any of the reasons in the run pipeline
+            # we get None or in erros then we send the default acknowlegment
             if result is None:
                 self._fallback(lead_id)
                 return

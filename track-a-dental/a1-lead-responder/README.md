@@ -30,6 +30,7 @@ Run all commands from the repo root.
 | DSGVO retention job | `uv run python -m lead_responder.scripts.run_retention` |
 | Intake API (layer 4b) | `uv run uvicorn lead_responder.api.main:app` (port 8000; `GET /health` answers `{"status":"ok"}`) |
 | Post a test lead (costs about $0.01: the real pipeline calls Claude) | see "Try the API" below |
+| Demo: three fake leads (routine, pain, Turkish) through the real API with the real Claude, then show the lead rows and the mails (about $0.03, asks first) | `uv run python -m lead_responder.scripts.demo_leads` (`--url http://127.0.0.1:8000` to use a running uvicorn) |
 | Sweep job (layer 4b): resend stuck acknowledgments, send unsent first replies, acknowledge leads with no reply | `uv run python -m lead_responder.scripts.run_sweep` |
 | Read the mails that were "sent" | Mailpit at http://localhost:8025 |
 
@@ -63,7 +64,7 @@ and open Mailpit (http://localhost:8025) to read the reply. This calls Claude (a
 
 **Settings** (env or `.env`, all listed with defaults in `.env.example`): `SMTP_HOST`, `SMTP_PORT`, `SMTP_STARTTLS`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_TIMEOUT_SECONDS`, `SMTP_LOCAL_HOSTNAME` (our name in the SMTP greeting, default `localhost`, so smtplib skips a slow DNS lookup per connection), `MAIL_FROM` (empty = the practice email); `MAX_LEADS_PER_EMAIL_HOUR` (3), `MAX_LEADS_PER_EMAIL_DAY` (10), `MAX_AI_LEADS_PER_HOUR` (60), `MAX_CONCURRENT_PIPELINES` (10), `PIPELINE_DEADLINE_SECONDS` (45); `SENDING_TIMEOUT_MINUTES` (10), `MAX_SEND_ATTEMPTS` (3), `NO_REPLY_SWEEP_MINUTES` (5); `MAX_BODY_BYTES` (32768), `CORS_ORIGINS` (empty = no browser origin).
 
-**Logs** carry ids and event names only, never email, name, phone, message or reply text (the exception is `shared/llm.py`, see REVIEW.md Parked); `tests/db/test_logging.py` checks this with canary leads through the whole flow. Pipeline event details (for example which guardrail failed) stay in `PipelineResult.events`, which the eval and try scripts print locally.
+**Logs** carry ids and event names only, never email, name, phone, message or reply text (the exception is `shared/llm.py`, see review/4b-intake-sender.md, Parked); `tests/db/test_logging.py` checks this with canary leads through the whole flow. Pipeline event details (for example which guardrail failed) stay in `PipelineResult.events`, which the eval and try scripts print locally.
 
 **Why it sells:** the patient gets an answer within seconds even when the AI is slow, down or over budget; a mail never goes out twice; one visitor cannot use the form to flood someone's inbox; and nothing personal ends up in log files that outlive the 90-day retention.
 
@@ -98,6 +99,6 @@ Re-run after any prompt, model or router change:
 
 ## DSGVO notes
 - Only redacted message text is sent to Anthropic; names, emails and phone fields stay local.
-- Known limitation: names, birth dates and street addresses written inside the message text are not removed (see REVIEW.md, "Parked: redactor hardening").
+- Known limitation: names, birth dates and street addresses written inside the message text are not removed (see review/layers-1-3.md, "Parked: redactor hardening").
 - Processors a real deployment needs a DPA (AVV) with: Anthropic, the email provider, the hosting provider.
 - These notes are orientation, not legal advice.
