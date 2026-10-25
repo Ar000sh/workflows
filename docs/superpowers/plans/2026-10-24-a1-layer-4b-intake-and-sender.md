@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12 (uv), FastAPI, pydantic v2 (`email-validator`), SQLAlchemy 2 + Alembic + psycopg (existing), `smtplib`, pytest, Postgres 16 + Mailpit in Docker (existing).
 
-**Spec:** `docs/superpowers/specs/2026-10-24-a1-layer-4b-intake-and-sender-design.md` (read it first; section 4 holds every decision, section 8 the failure modes P1-P12). Parent spec: `docs/superpowers/specs/2026-10-05-a1-lead-responder-design.md` (§5, §7, §14 rows 5-11). Read A1 `REVIEW.md` "Carry into the 4b/4c/4d plans".
+**Spec:** `docs/superpowers/specs/2026-10-24-a1-layer-4b-intake-and-sender-design.md` (read it first; section 4 holds every decision, section 8 the failure modes P1-P12). Parent spec: `docs/superpowers/specs/2026-10-05-a1-lead-responder-design.md` (§5, §7, §14 rows 5-11). Read A1 `review/4a-data-foundation.md` "Carry into the 4b/4c/4d plans".
 
 ## Global Constraints
 - Code in `track-a-dental/a1-lead-responder/lead_responder/` (new subpackages `api/`, `services/`), tests in `.../a1-lead-responder/tests/` (DB tests in `tests/db/`, they skip without Postgres). New dependencies in the root `pyproject.toml`: `fastapi>=0.115`, `email-validator>=2.1`, `uvicorn>=0.30`; dev group `httpx>=0.27` (TestClient). Python 3.12 pinned in `.python-version`.

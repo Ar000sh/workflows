@@ -231,5 +231,5 @@ Written before building layer 4. Status: **design** = handled by the design belo
 | 17 | A sensitive lead waits unnoticed | Sensitive queue first, drafts over `APPROVAL_WARN_HOURS` highlighted, route-1/2 leads flagged `needs_manual_review` | 4d | design |
 | 18 | Demo site posts to the wrong place or leaks the API key | Static page only knows the form URL; no secrets in the page | 4e | design |
 | 19 | Cost abuse (unlimited AI calls from one actor) | Rate limits (#9) plus a global cap on AI-processed leads per hour (`MAX_AI_LEADS_PER_HOUR`, built in 4b; above it the fixed acknowledgment, no AI) | 4b | done (4b, hourly cap); a daily cap parked until a client deployment |
-| 20 | Redactor, guardrail and keyword-net gaps from the attack report | See "Parked" in `REVIEW.md` | n/a | parked |
+| 20 | Redactor, guardrail and keyword-net gaps from the attack report | See "Parked" in `review/layers-1-3.md` | n/a | parked |
 

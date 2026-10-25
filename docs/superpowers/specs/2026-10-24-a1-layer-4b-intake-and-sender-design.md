@@ -1,6 +1,6 @@
 # A1 Layer 4b (intake API and sender): Design Spec
 
-> Part of the A1 lead responder (main spec: `2026-10-05-a1-lead-responder-design.md`, section 14 lists the layer 4 failure modes). 4b follows 4a (data foundation, merged 2026-10-24). 4c (auth and audit), 4d (dashboard) and 4e (demo site, end-to-end) come after. Read the A1 `REVIEW.md` section "Carry into the 4b/4c/4d plans" together with this file.
+> Part of the A1 lead responder (main spec: `2026-10-05-a1-lead-responder-design.md`, section 14 lists the layer 4 failure modes). 4b follows 4a (data foundation, merged 2026-10-24). 4c (auth and audit), 4d (dashboard) and 4e (demo site, end-to-end) come after. Read the A1 `review/4a-data-foundation.md` section "Carry into the 4b/4c/4d plans" together with this file.
 
 ## 1. Purpose and business outcome
 Outcome 1, **never miss a lead**: a website form posts a lead, the patient gets an acknowledgment or auto-reply by email within 60 seconds, and sensitive leads wait for staff approval. 4b is the first layer where the layer 1-3 pipeline (`process_inquiry`) meets the database and a real email send.
