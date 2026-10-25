@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from lead_responder.db.models import Reply, ReplyStatus
+from lead_responder.limits import mailbox_key
 from lead_responder.repository import InvalidTransition, Repository
 from lead_responder.router import Action
 
@@ -21,6 +22,7 @@ def make_lead(repo: Repository, **overrides):
         message="Ich moechte einen Termin.", consent_at=NOW, now=NOW,
     )
     fields.update(overrides)
+    fields.setdefault("mailbox_key", mailbox_key(fields["email"]))
     lead, _ = repo.create_lead_if_new(**fields)
     return lead
 
@@ -78,6 +80,7 @@ def test_set_reply_status_sent_sets_sent_at(session):
     repo = Repository(session)
     reply = add(repo, make_lead(repo).id)
     later = NOW + timedelta(minutes=1)
+    repo.set_reply_status(reply.id, ReplyStatus.SENDING, now=NOW)
     updated = repo.set_reply_status(reply.id, ReplyStatus.SENT, now=later)
     session.expire_all()
     assert updated.status == "sent"
@@ -88,7 +91,7 @@ def test_set_reply_status_other_statuses_leave_sent_at_empty(session):
     repo = Repository(session)
     reply = add(repo, make_lead(repo).id)
     # One reply per target status: moves out of "rejected" are no longer allowed.
-    for status in (ReplyStatus.APPROVED, ReplyStatus.REJECTED, ReplyStatus.FAILED):
+    for status in (ReplyStatus.APPROVED, ReplyStatus.REJECTED, ReplyStatus.SENDING, ReplyStatus.FAILED):
         updated = repo.set_reply_status(
             add(repo, reply.lead_id).id, status, now=NOW + timedelta(minutes=1),
         )
@@ -99,17 +102,18 @@ def test_set_reply_status_other_statuses_leave_sent_at_empty(session):
 def test_failed_reply_keeps_error_text(session):
     repo = Repository(session)
     reply = add(repo, make_lead(repo).id)
-    repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="timeout: may have been sent")
+    repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="SMTPRecipientsRefused")
     session.expire_all()
     stored = repo.replies_for(reply.lead_id)[0]
     assert stored.status == "failed"
-    assert stored.error == "timeout: may have been sent"
+    assert stored.error == "SMTPRecipientsRefused"
 
 
 def test_successful_resend_clears_old_error(session):
     repo = Repository(session)
     reply = add(repo, make_lead(repo).id)
     repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="smtp down")
+    repo.set_reply_status(reply.id, ReplyStatus.SENDING, now=NOW)
     repo.set_reply_status(reply.id, ReplyStatus.SENT, now=NOW)
     assert reply.error is None
 
@@ -127,7 +131,8 @@ def test_set_reply_status_records_approver_and_edited(session):
     stored = repo.replies_for(reply.lead_id)[0]
     assert stored.approved_by == user.id
     assert stored.edited is False
-    # A later transition that passes neither must not wipe them.
+    # Later transitions that pass neither must not wipe them.
+    repo.set_reply_status(reply.id, ReplyStatus.SENDING, now=NOW)
     repo.set_reply_status(reply.id, ReplyStatus.SENT, now=NOW)
     session.expire_all()
     stored = repo.replies_for(reply.lead_id)[0]
@@ -194,6 +199,7 @@ def test_hostile_text_in_bodies(session):
 def test_sent_is_final(session):
     repo = Repository(session)
     reply = add(repo, make_lead(repo).id)
+    repo.set_reply_status(reply.id, ReplyStatus.SENDING, now=NOW)
     repo.set_reply_status(reply.id, ReplyStatus.SENT, now=NOW)
     for status in ReplyStatus:
         with pytest.raises(InvalidTransition):
@@ -216,16 +222,51 @@ def test_rejected_is_final(session):
 def test_the_normal_approval_path_is_allowed(session):
     repo = Repository(session)
     reply = add(repo, make_lead(repo).id)
-    for status in (ReplyStatus.APPROVED, ReplyStatus.SENT):
+    for status in (ReplyStatus.APPROVED, ReplyStatus.SENDING, ReplyStatus.SENT):
         assert repo.set_reply_status(reply.id, status, now=NOW).status == status.value
 
 
-def test_failed_can_be_resent_or_fail_again(session):
+# A failed reply is resent by claiming it again; it cannot go straight to sent or fail again.
+def test_failed_can_only_be_claimed_again(session):
     repo = Repository(session)
     reply = add(repo, make_lead(repo).id)
     repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="smtp down")
+    for status in (ReplyStatus.SENT, ReplyStatus.FAILED, ReplyStatus.APPROVED):
+        with pytest.raises(InvalidTransition):
+            repo.set_reply_status(reply.id, status, now=NOW, error="still down")
+    assert repo.set_reply_status(reply.id, ReplyStatus.SENDING, now=NOW).status == "sending"
     repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="still down")
+    repo.set_reply_status(reply.id, ReplyStatus.SENDING, now=NOW)
     assert repo.set_reply_status(reply.id, ReplyStatus.SENT, now=NOW).status == "sent"
+
+
+# The claim also stamps claimed_at and counts the attempt, in the same UPDATE as the status.
+def test_claim_sets_claimed_at_and_counts_attempts(session):
+    repo = Repository(session)
+    reply = add(repo, make_lead(repo).id)
+    assert reply.claimed_at is None and reply.send_attempts == 0
+    later = NOW + timedelta(minutes=3)
+    claimed = repo.set_reply_status(reply.id, ReplyStatus.SENDING, now=later)
+    assert (claimed.status, claimed.claimed_at, claimed.send_attempts) == ("sending", later, 1)
+    repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=later, error="SMTPException")
+    second = later + timedelta(minutes=1)
+    again = repo.set_reply_status(reply.id, ReplyStatus.SENDING, now=second)
+    assert (again.claimed_at, again.send_attempts) == (second, 2)
+    # Other moves leave both alone.
+    done = repo.set_reply_status(reply.id, ReplyStatus.SENT, now=second + timedelta(minutes=1))
+    assert (done.claimed_at, done.send_attempts) == (second, 2)
+
+
+# A refused claim must not count as an attempt.
+def test_refused_claim_does_not_count_an_attempt(session):
+    repo = Repository(session)
+    reply = add(repo, make_lead(repo).id)
+    repo.set_reply_status(reply.id, ReplyStatus.REJECTED, now=NOW)
+    with pytest.raises(InvalidTransition):
+        repo.set_reply_status(reply.id, ReplyStatus.SENDING, now=NOW)
+    session.expire_all()
+    stored = session.get(Reply, reply.id)
+    assert (stored.send_attempts, stored.claimed_at) == (0, None)
 
 
 def test_same_status_is_refused(session):
@@ -263,6 +304,7 @@ def test_stale_session_cannot_send_twice(engine, session):
         repo_b = Repository(other)
         seen = other.get(Reply, reply.id)
         assert seen.status == "approved"  # B's cached view
+        repo_a.set_reply_status(reply.id, ReplyStatus.SENDING, now=NOW)
         repo_a.set_reply_status(reply.id, ReplyStatus.SENT, now=NOW)
         with pytest.raises(InvalidTransition):
             repo_b.set_reply_status(reply.id, ReplyStatus.SENT, now=NOW + timedelta(minutes=1))
@@ -270,19 +312,36 @@ def test_stale_session_cannot_send_twice(engine, session):
     assert session.get(Reply, reply.id).sent_at == NOW  # the first send's timestamp survives
 
 
-# Real race: both threads try approved -> sent at the same moment. The UPDATE's row lock makes
-# the second one wait, re-check the WHERE and find 0 rows, so exactly one wins.
-def test_two_threads_racing_to_send_exactly_one_wins(engine, session):
+# The same stale view for the claim itself: B still believes "approved" and tries to claim a reply
+# that A already sent. The claim is refused and the attempt is not counted.
+def test_stale_session_cannot_claim_a_sent_reply(engine, session):
+    repo_a = Repository(session)
+    reply = add(repo_a, make_lead(repo_a).id)
+    repo_a.set_reply_status(reply.id, ReplyStatus.APPROVED, now=NOW)
+    with Session(engine, expire_on_commit=False) as other:
+        assert other.get(Reply, reply.id).status == "approved"  # B's cached view
+        repo_a.set_reply_status(reply.id, ReplyStatus.SENDING, now=NOW)
+        repo_a.set_reply_status(reply.id, ReplyStatus.SENT, now=NOW)
+        with pytest.raises(InvalidTransition):
+            Repository(other).set_reply_status(reply.id, ReplyStatus.SENDING, now=NOW + timedelta(minutes=1))
+    session.expire_all()
+    stored = session.get(Reply, reply.id)
+    assert (stored.status, stored.send_attempts, stored.claimed_at) == ("sent", 1, NOW)
+
+
+# Real race on the claim: both threads try drafted -> sending at the same moment. The UPDATE's row
+# lock makes the second one wait, re-check the WHERE and find 0 rows, so exactly one wins and
+# exactly one attempt is counted. This is what keeps a patient from getting two emails.
+def test_two_sessions_claiming_one_reply_exactly_one_wins(engine, session):
     repo = Repository(session)
     reply = add(repo, make_lead(repo).id)
-    repo.set_reply_status(reply.id, ReplyStatus.APPROVED, now=NOW)
     barrier = threading.Barrier(2)
 
     def attempt(_):
         with Session(engine, expire_on_commit=False) as s:
             barrier.wait()
             try:
-                Repository(s).set_reply_status(reply.id, ReplyStatus.SENT, now=NOW)
+                Repository(s).set_reply_status(reply.id, ReplyStatus.SENDING, now=NOW)
                 return "won"
             except InvalidTransition:
                 return "lost"
@@ -290,3 +349,6 @@ def test_two_threads_racing_to_send_exactly_one_wins(engine, session):
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = sorted(pool.map(attempt, range(2)))
     assert results == ["lost", "won"]
+    session.expire_all()
+    stored = session.get(Reply, reply.id)
+    assert (stored.status, stored.send_attempts) == ("sending", 1)

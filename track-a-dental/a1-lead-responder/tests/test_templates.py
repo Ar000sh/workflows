@@ -1,6 +1,6 @@
 import pytest
 
-from lead_responder.templates import acknowledgment
+from lead_responder.templates import acknowledgment, subject
 
 
 def ack(practice, language="de", **kwargs):
@@ -58,3 +58,16 @@ def test_name_with_braces_is_literal(practice):
 def test_unknown_language_rejected(practice):
     with pytest.raises(ValueError):
         ack(practice, language="tr")
+
+
+# The subject is fixed text (never AI or form input), so it cannot carry an injected header.
+def test_subject_per_language(practice):
+    assert subject("de", practice) == "Ihre Anfrage an die Zahnarztpraxis BrightSmile"
+    assert subject("en", practice) == "Your inquiry to Zahnarztpraxis BrightSmile"
+
+
+@pytest.mark.parametrize("language", ["de+en", "tr", "", None])
+def test_subject_combined_or_unknown_language_is_bilingual(practice, language):
+    text = subject(language, practice)
+    assert text == "Ihre Anfrage / Your inquiry: Zahnarztpraxis BrightSmile"
+    assert "\n" not in text and "\r" not in text

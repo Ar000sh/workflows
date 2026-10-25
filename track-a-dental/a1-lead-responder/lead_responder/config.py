@@ -17,3 +17,42 @@ MAX_MESSAGE_CHARS = 5000
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql+psycopg://leads:leads@localhost:5433/leads")
 DATABASE_URL_TEST = os.environ.get("DATABASE_URL_TEST", "postgresql+psycopg://leads:leads@localhost:5433/leads_test")
 RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "90"))  # DSGVO: personal fields are blanked after this many days
+
+# Layer 4b: outgoing mail. The defaults point at Mailpit from docker-compose.yml (no TLS, no login);
+# a real provider sets host, port, STARTTLS and credentials. MAIL_FROM empty = the practice email.
+SMTP_HOST = os.environ.get("SMTP_HOST", "localhost")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "1025"))
+SMTP_STARTTLS = os.environ.get("SMTP_STARTTLS", "false").strip().lower() in ("1", "true", "yes")
+SMTP_USER = os.environ.get("SMTP_USER") or None
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD") or None
+SMTP_TIMEOUT_SECONDS = float(os.environ.get("SMTP_TIMEOUT_SECONDS", "10"))
+# The name our side gives in the SMTP greeting (EHLO). Fixed, because without it smtplib looks up
+# this machine's full DNS name on every connection, which can take about a second.
+SMTP_LOCAL_HOSTNAME = os.environ.get("SMTP_LOCAL_HOSTNAME", "localhost")
+MAIL_FROM = os.environ.get("MAIL_FROM", "")
+
+# Layer 4b: intake limits (services/intake.py). Per mailbox: more than _HOUR leads in the last hour
+# or more than _DAY in the last day (the new lead included) are saved with no email and no AI.
+# Above MAX_AI_LEADS_PER_HOUR leads in the last hour (all addresses), or with all
+# MAX_CONCURRENT_PIPELINES busy, a lead gets the fixed acknowledgment instead of the AI. A pipeline
+# run that takes longer than PIPELINE_DEADLINE_SECONDS is given up for the fixed acknowledgment.
+MAX_LEADS_PER_EMAIL_HOUR = int(os.environ.get("MAX_LEADS_PER_EMAIL_HOUR", "3"))
+MAX_LEADS_PER_EMAIL_DAY = int(os.environ.get("MAX_LEADS_PER_EMAIL_DAY", "10"))
+MAX_AI_LEADS_PER_HOUR = int(os.environ.get("MAX_AI_LEADS_PER_HOUR", "60"))
+MAX_CONCURRENT_PIPELINES = int(os.environ.get("MAX_CONCURRENT_PIPELINES", "10"))
+PIPELINE_DEADLINE_SECONDS = float(os.environ.get("PIPELINE_DEADLINE_SECONDS", "45"))
+
+# Layer 4b: the sweep (scripts/run_sweep.py). An acknowledgment claimed longer than
+# SENDING_TIMEOUT_MINUTES ago with no result is resent, at most MAX_SEND_ATTEMPTS claims in all
+# (an auto-reply stuck that long is never resent, its lead is only flagged for staff);
+# a first reply left "drafted" (never claimed) longer than NO_REPLY_SWEEP_MINUTES is sent, and a
+# lead older than NO_REPLY_SWEEP_MINUTES with no first reply gets the fallback acknowledgment.
+SENDING_TIMEOUT_MINUTES = int(os.environ.get("SENDING_TIMEOUT_MINUTES", "10"))
+MAX_SEND_ATTEMPTS = int(os.environ.get("MAX_SEND_ATTEMPTS", "3"))
+NO_REPLY_SWEEP_MINUTES = int(os.environ.get("NO_REPLY_SWEEP_MINUTES", "5"))
+
+# Layer 4b: the HTTP API (api/app.py). A request body larger than MAX_BODY_BYTES is refused with 413
+# before it is parsed. CORS_ORIGINS is a comma list of website origins allowed to post from a
+# browser; empty (the default) allows none, which is right when the form is posted by a server.
+MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", "32768"))
+CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]

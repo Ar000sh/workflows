@@ -1,0 +1,387 @@
+"""ReplyService: sends one reply by email, exactly once, and records what happened.
+
+The flow of send(reply_id) (spec section 6 "Sending"):
+  1. read the reply (fresh from the database)
+  2. check the kind may be sent from its status (a draft needs staff approval first; a reply in
+     "sending" belongs to whoever claimed it), then read the lead: no address -> refuse, no claim
+  3. CLAIM: reply -> "sending" in one conditional UPDATE that commits. Only the winner continues;
+     a second worker or a double click gets "already handled" and sends nothing
+  4. read the address again (retention may have blanked it meanwhile), then call the sender with
+     no transaction open and no connection held: a slow SMTP server must not block other writers.
+     A sender that raises instead of returning a result counts as a timeout (in doubt)
+  5. record "sent" or "failed"; a timeout records nothing, so the reply stays "sending" (unknown)
+  6. for a first reply, fix the lead: an auto-reply that went out makes the lead "auto_replied";
+     one that failed or is in doubt puts the lead in the staff queue instead
+This is the claim-before-send (outbox) pattern: the database says who may send BEFORE the email
+leaves, because nothing can take an email back afterwards.
+
+sweep() is the scheduled clean-up (spec section 6 "Sweep", run by scripts/run_sweep.py):
+  1. acknowledgments stuck in "sending" (claimed over SENDING_TIMEOUT_MINUTES ago): sending ->
+     failed, then send() again, up to MAX_SEND_ATTEMPTS claims; at the cap they wait for staff.
+     Also acknowledgments a previous sweep moved to "failed" (error STUCK_ERROR) but could not
+     claim again (the re-send raised or the process died in between): send() them, same cap.
+     Drafts and auto-replies in "sending" are never resent: a duplicate medical reply is not
+     harmless. A stuck auto-reply only flags its lead, so staff see it
+  1b. acknowledgments and auto-replies still "drafted" (written, never claimed: the writer died
+     or the database failed before the send) and older than NO_REPLY_SWEEP_MINUTES: send() them.
+     Never a staff draft (kind "draft"): it waits for approval
+  2. leads older than NO_REPLY_SWEEP_MINUTES with no first reply: the fallback acknowledgment
+Each item runs on its own: one that raises is logged (class name and id), its lead is flagged,
+it is counted in SweepResult.errors and the sweep goes on with the next one, so one broken item
+cannot starve all the others on every run. run_sweep.py exits 1 when errors > 0.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import StrEnum
+from typing import Callable
+
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from lead_responder import config, templates
+from lead_responder.db.models import Lead, LeadStatus, ReplyStatus
+from lead_responder.practice import Practice
+from lead_responder.prompting import sanitize_name
+from lead_responder.repository import InvalidTransition, Repository
+from lead_responder.router import COMBINED_LANGUAGE, Action
+from lead_responder.sender import Outcome, Sender, SendResult
+
+log = logging.getLogger(__name__)
+
+
+class SendOutcome(StrEnum):
+    SENT = "sent"                        # the provider accepted it, recorded "sent"
+    FAILED = "failed"                    # known not sent, recorded "failed" (staff can resend)
+    IN_DOUBT = "in_doubt"                # may have gone out; the reply stays "sending"
+    ALREADY_HANDLED = "already_handled"  # another sender won the claim, or it is sent/rejected/in flight
+    REFUSED = "refused"                  # must not be sent: no address any more, or a draft not approved
+
+
+# The statuses each kind may be claimed from. A business rule, so it lives here: the transition
+# table allows drafted -> sending for every kind (acknowledgments and auto-replies need it), so
+# without this check an unapproved staff draft could be emailed.
+SEND_FROM: dict[Action, frozenset[ReplyStatus]] = {
+    Action.ACKNOWLEDGMENT: frozenset({ReplyStatus.DRAFTED, ReplyStatus.FAILED}),
+    Action.AUTO_REPLY: frozenset({ReplyStatus.DRAFTED, ReplyStatus.FAILED}),
+    Action.DRAFT: frozenset({ReplyStatus.APPROVED, ReplyStatus.FAILED}),
+}
+# A refused reply in one of these moves to "failed" (the table allows it); a failed one stays.
+# "sending" is passed only by the claim's owner after its own claim: step 1 sends a reply in
+# "sending" away as ALREADY_HANDLED before the address check, so it never moves another's claim.
+_REFUSE_TO_FAILED = (ReplyStatus.DRAFTED, ReplyStatus.APPROVED, ReplyStatus.SENDING)
+
+# The error the sweep stores when it gives up a stuck claim. Fixed text: no address, no message.
+STUCK_ERROR = "stuck: retried by sweep"
+# The sweep reads ALL stuck acknowledgments (this cap is the largest Postgres integer) and splits
+# them itself into "resend" and "at the cap, left for staff", so both come from one read.
+_NO_ATTEMPT_CAP = 2**31 - 1
+
+
+# What one sweep did, for the script's printout and the tests. The later fields have defaults so
+# the counts can be given by position in their original order.
+@dataclass(frozen=True)
+class SweepResult:
+    retried_acknowledgments: int   # stuck (or failed-by-sweep) acknowledgments resent, whatever the new outcome
+    fallback_acknowledgments: int  # leads that got the fallback acknowledgment from this sweep
+    left_for_staff: int            # stuck acknowledgments at MAX_SEND_ATTEMPTS, not resent
+    sent_stale_drafted: int = 0    # first replies left "drafted" (never claimed) that this sweep sent
+    errors: int = 0                # items that raised: logged, lead flagged, skipped; run_sweep exits 1
+    flagged_stuck_auto_replies: int = 0  # leads flagged because their auto-reply is stuck in "sending"
+
+
+# True when the lead has no address to write to: retention blanked it (DSGVO) or it is empty.
+def _no_address(lead: Lead) -> bool:
+    return lead.anonymized_at is not None or not (lead.email or "").strip()
+
+
+class ReplyService:
+    # session_factory makes one short-lived Session per call (sessionmaker from db/session.py);
+    # clock gives "now" (timezone-aware) so tests control the timestamps.
+    def __init__(
+        self, *, session_factory: Callable[[], Session], sender: Sender, practice: Practice,
+        clock: Callable[[], datetime],
+    ):
+        self._session_factory = session_factory
+        self._sender = sender
+        self._practice = practice
+        self._clock = clock
+
+    # Sends one reply (see the module docstring for the steps). Safe to call twice or from two
+    # workers at once: the claim lets exactly one of them send.
+    def send(self, reply_id: int) -> SendOutcome:
+        return self._send(reply_id, subject_language=None)
+
+    # Route-1 fallback (deadline expired, pipeline crashed, sweep found a lead with no reply): the
+    # fixed DE+EN acknowledgment with the emergency numbers, chosen by whether the practice is open
+    # now; the name goes through sanitize_name because nobody reviews this text. acknowledge_lead
+    # writes it and flags the lead in one transaction; if another writer already gave the lead its
+    # first reply we get InvalidTransition and return False without sending. True means this call
+    # wrote the acknowledgment and attempted the send (the send's own outcome is recorded on the reply).
+    def acknowledge_with_fallback(self, lead_id: int) -> bool:
+        now = self._clock()
+        with self._session_factory() as session:
+            repo = Repository(session)
+            lead = repo.get_lead(lead_id)
+            if lead is None:
+                raise LookupError(f"lead {lead_id} not found")
+            body = templates.acknowledgment(
+                COMBINED_LANGUAGE, name=sanitize_name(lead.name), practice=self._practice,
+                emergency=True, practice_open=self._practice.is_open(now),
+            )
+            try:
+                reply = repo.acknowledge_lead(
+                    lead_id, kind=Action.ACKNOWLEDGMENT, ai_body=None, body=body, now=now,
+                    needs_manual_review=True,
+                )
+            except InvalidTransition:
+                log.info("lead %s: fallback acknowledgment skipped, first reply exists", lead_id)
+                return False
+            reply_id = reply.id
+        self._send(reply_id, subject_language=COMBINED_LANGUAGE)
+        return True
+
+    # The scheduled clean-up (module docstring). Safe to run twice in a row (the second run finds
+    # nothing) and twice at once: every action goes through a conditional write that one sweep
+    # wins, fail_stuck_reply and the claim for part 1, the claim for part 1b, acknowledge_lead's
+    # lock for part 2. Part 1b runs before part 2 and uses the same age, so a lead whose first
+    # reply was written but never sent is picked up here (part 2 skips it: a first reply exists). A lead
+    # anonymized between the read and the action is skipped (send refuses it, acknowledge_lead
+    # raises ValueError). All lists are read first in one short session; no lock and no
+    # transaction is held while emails go out. Every item then runs through _guarded, so one
+    # that raises is counted and skipped instead of ending the whole run.
+    def sweep(self) -> SweepResult:
+        now = self._clock()
+        stuck_before = now - timedelta(minutes=config.SENDING_TIMEOUT_MINUTES)
+        no_reply_before = now - timedelta(minutes=config.NO_REPLY_SWEEP_MINUTES)
+        # PHASE A: read every list we need, in one short session that closes before any email goes
+        # out. These are only candidates; each action below re-checks with a conditional write,
+        # so a row another sweep or worker handled meanwhile is skipped, not repeated.
+        with self._session_factory() as session:
+            repo = Repository(session)
+            # Part 1 candidates: acknowledgments claimed ("sending") more than SENDING_TIMEOUT_MINUTES
+            # ago. A claim that old means the sender crashed or timed out: the outcome is unknown.
+            # Read without an attempt limit, then split here, so one query gives both groups:
+            # `retry` (claimed fewer than MAX_SEND_ATTEMPTS times) is resent; the rest hit the
+            # limit and wait for staff (`left_for_staff`), so a broken mail server cannot make
+            # the sweep email one patient forever.
+            stuck = repo.stuck_sending_replies(
+                kind=Action.ACKNOWLEDGMENT, claimed_before=stuck_before, max_attempts=_NO_ATTEMPT_CAP,
+            )
+            retry = [(r.id, r.lead_id) for r in stuck if r.send_attempts < config.MAX_SEND_ATTEMPTS]
+            left_for_staff = len(stuck) - len(retry)
+            # Part 1 leftovers: acknowledgments an earlier sweep already moved to "failed" (its
+            # STUCK_ERROR text) but did not manage to send again, because the process died between
+            # the two steps. Without this list they would sit in "failed" for good.
+            failed_by_sweep = [(r.id, r.lead_id) for r in repo.failed_stuck_replies(
+                kind=Action.ACKNOWLEDGMENT, error=STUCK_ERROR, claimed_before=stuck_before,
+                max_attempts=config.MAX_SEND_ATTEMPTS,
+            )]
+            # Part 1 for auto-replies: leads whose AI auto-reply is stuck in "sending". Never
+            # resent (a second medical-looking answer is not harmless); we only flag the lead,
+            # skipping leads that are flagged already so the count shows new work only.
+            stuck_auto_leads = [lead.id for lead in repo.unflagged_leads_with_stuck_replies(
+                kind=Action.AUTO_REPLY, claimed_before=stuck_before,
+            )]
+            # Part 1b: first replies written ("drafted") but never claimed, older than
+            # NO_REPLY_SWEEP_MINUTES. The writer died or the database failed before send() ran.
+            # Staff drafts are not in this list: they wait for approval.
+            stale = [(r.id, r.lead_id) for r in repo.stale_drafted_first_replies(created_before=no_reply_before)]
+            # Part 2: leads older than NO_REPLY_SWEEP_MINUTES with no first reply at all (the
+            # server restarted while the pipeline ran). They get the fixed acknowledgment.
+            lead_ids = [lead.id for lead in repo.leads_without_first_reply(created_before=no_reply_before)]
+        # PHASE B: act on each candidate on its own, through _guarded (one that raises is counted
+        # and skipped). Each entry is True = done, False = skipped (someone else handled it) or
+        # None = raised. Parts 1, 1b and 2 are independent of each other and safe in this order:
+        # 1b runs before 2 on the same age, so a lead with a written-but-unsent reply is sent
+        # here and part 2 skips it (a first reply exists).
+        # Part 1: give up the stale claim (sending -> failed), then send() claims it again.
+        part1 = [self._guarded("reply", rid, lid, lambda rid=rid: self._retry_stuck(rid, stuck_before))
+                 for rid, lid in retry]
+        # Part 1 leftovers: already "failed" by the sweep, so only send() is needed.
+        part1 += [self._guarded("reply", rid, lid, lambda rid=rid: self._attempted(self.send(rid)))
+                  for rid, lid in failed_by_sweep]
+        # Part 1, auto-replies: flag only, no email.
+        flagged = [self._guarded("lead", lid, lid, lambda lid=lid: self._flag(lid)) for lid in stuck_auto_leads]
+        # Part 1b: send the written first replies (send() claims them).
+        part1b = [self._guarded("reply", rid, lid, lambda rid=rid: self._attempted(self.send(rid)))
+                  for rid, lid in stale]
+        # Part 2: write and send the fixed acknowledgment for leads that have no first reply.
+        part2 = [self._guarded("lead", lid, lid, lambda lid=lid: self._fallback(lid)) for lid in lead_ids]
+        everything = part1 + flagged + part1b + part2
+        result = SweepResult(
+            retried_acknowledgments=part1.count(True), fallback_acknowledgments=part2.count(True),
+            left_for_staff=left_for_staff, sent_stale_drafted=part1b.count(True),
+            errors=everything.count(None), flagged_stuck_auto_replies=flagged.count(True),
+        )
+        log.info(
+            "sweep: %s retried, %s stale drafted sent, %s fallback, %s left for staff, "
+            "%s stuck auto-replies flagged, %s errors",
+            result.retried_acknowledgments, result.sent_stale_drafted, result.fallback_acknowledgments,
+            result.left_for_staff, result.flagged_stuck_auto_replies, result.errors,
+        )
+        return result
+
+    # Runs one sweep item. Any exception (a database blip, a bug, a poison row) is logged with the
+    # exception CLASS name and the id only (the text could hold an address), the item's lead is
+    # flagged so staff see it, and None tells sweep() to count an error and go on. Why catch
+    # everything here: one item that always raises would otherwise end every run before the
+    # items after it, and the "no patient left without a reply" net would stop for all of them.
+    def _guarded(self, what: str, item_id: int, lead_id: int, action: Callable[[], bool]) -> bool | None:
+        try:
+            return action()
+        except Exception as e:
+            log.error("sweep: %s %s raised %s; lead %s flagged for staff", what, item_id, type(e).__name__, lead_id)
+            try:
+                self._flag(lead_id)
+            except Exception as flag_error:  # best effort: the error is already counted
+                log.error("lead %s: flagging for review failed (%s)", lead_id, type(flag_error).__name__)
+            return None
+
+    # Puts the lead on the staff review list, in its own short session. True for the counts.
+    def _flag(self, lead_id: int) -> bool:
+        with self._session_factory() as session:
+            Repository(session).flag_for_review(lead_id)
+        return True
+
+    # True if send() handed the email to the sender (whatever came back); False if it sent nothing
+    # (another sweep won the claim, or the lead has no address any more).
+    @staticmethod
+    def _attempted(outcome: SendOutcome) -> bool:
+        return outcome in (SendOutcome.SENT, SendOutcome.FAILED, SendOutcome.IN_DOUBT)
+
+    # Part 1 for one reply: give up the stale claim (InvalidTransition = another sweep or a late
+    # result got there first: skip), then send() claims it again. If send() raises after the
+    # give-up committed, the reply is "failed" with STUCK_ERROR and the next sweep's
+    # failed_stuck_replies list picks it up. True if an email was attempted.
+    def _retry_stuck(self, reply_id: int, stuck_before: datetime) -> bool:
+        with self._session_factory() as session:
+            try:
+                Repository(session).fail_stuck_reply(reply_id, claimed_before=stuck_before, error=STUCK_ERROR)
+            except InvalidTransition:
+                log.info("reply %s: stuck claim already handled", reply_id)
+                return False
+        return self._attempted(self.send(reply_id))
+
+    # Part 2 for one lead. False: another writer gave it a first reply or it was suppressed
+    # (acknowledge_with_fallback returns False), or retention anonymized it after the read
+    # (acknowledge_lead raises ValueError).
+    def _fallback(self, lead_id: int) -> bool:
+        try:
+            return self.acknowledge_with_fallback(lead_id)
+        except ValueError:
+            log.info("lead %s: fallback skipped, lead anonymized", lead_id)
+            return False
+
+    # The steps of send(). subject_language overrides the lead's language for the subject (the
+    # fallback acknowledgment is bilingual whatever the lead's language is).
+    def _send(self, reply_id: int, *, subject_language: str | None) -> SendOutcome:
+        with self._session_factory() as session:
+            repo = Repository(session)
+            # Step 1: fresh read; each Repository call commits, so no snapshot is kept.
+            reply = repo.get_reply(reply_id)
+            if reply is None:
+                raise LookupError(f"reply {reply_id} not found")
+            kind, status, lead_id = Action(reply.kind), ReplyStatus(reply.status), reply.lead_id
+            # Step 2 (before the address check): the service's rule on top of the transition table.
+            # First, so an unapproved draft is never moved (drafted -> failed would make it
+            # sendable without approval) and a reply another worker is sending is never touched.
+            if status not in SEND_FROM[kind]:
+                if kind is Action.DRAFT and status is ReplyStatus.DRAFTED:
+                    log.warning("reply %s: refused, draft not approved", reply_id)
+                    return SendOutcome.REFUSED
+                return SendOutcome.ALREADY_HANDLED
+            lead = repo.get_lead(lead_id)
+            if _no_address(lead):
+                return self._refuse(repo, reply_id, status)
+            # Step 3: the claim. It commits before anything is sent; the loser stops here.
+            try:
+                claimed = repo.set_reply_status(reply_id, ReplyStatus.SENDING, now=self._clock())
+            except InvalidTransition:
+                log.info("reply %s: claim lost, already handled", reply_id)
+                return SendOutcome.ALREADY_HANDLED
+            # Step 4: the address again, after the claim (spec 11f), and the body from the claimed row.
+            lead = repo.get_lead(lead_id)
+            if _no_address(lead):
+                return self._refuse(repo, reply_id, ReplyStatus.SENDING)
+            to, body = lead.email, claimed.body
+            subject = templates.subject(subject_language or lead.language, self._practice)
+            # close() ends any transaction and gives the connection back to the pool for the
+            # duration of the send; the Session is reusable afterwards for the recording.
+            session.close()
+            try:
+                result = self._sender.send(to=to, subject=subject, body=body)
+            except Exception as e:
+                # A sender must return a SendResult; one that raises after the claim may or may
+                # not have sent, so it counts as in doubt. Class name only: the text may hold the address.
+                log.error("reply %s: sender raised %s, outcome unknown", reply_id, type(e).__name__)
+                result = SendResult(Outcome.TIMEOUT, type(e).__name__)
+            # Step 5 and 6.
+            outcome = self._record(repo, reply_id, result)
+            self._update_lead(repo, lead_id, kind, outcome)
+            return outcome
+
+    # No address: nothing is sent and nothing is claimed. The reply moves to "failed" with no error
+    # text (there is no address to mention), so it leaves the "to send" lists; already "failed"
+    # stays as it is. InvalidTransition = someone else moved it meanwhile, which is fine.
+    def _refuse(self, repo: Repository, reply_id: int, status: ReplyStatus) -> SendOutcome:
+        if status in _REFUSE_TO_FAILED:
+            try:
+                repo.set_reply_status(reply_id, ReplyStatus.FAILED, now=self._clock(), error=None)
+            except InvalidTransition:
+                pass
+        log.warning("reply %s: refused, lead has no address", reply_id)
+        return SendOutcome.REFUSED
+
+    # Writes the sender's result. The stored error is the exception class name only (SendResult
+    # guarantees it). If the database fails while recording (probe P8), or a staff member already
+    # moved the reply, it stays as it is ("sending" = unknown) and the answer is IN_DOUBT: an
+    # accepted email recorded as "failed" would invite a second copy.
+    def _record(self, repo: Repository, reply_id: int, result: SendResult) -> SendOutcome:
+        now = self._clock()
+        try:
+            if result.outcome is Outcome.ACCEPTED:
+                repo.set_reply_status(reply_id, ReplyStatus.SENT, now=now)
+                log.info("reply %s: sent", reply_id)
+                return SendOutcome.SENT
+            if result.outcome is Outcome.FAILED:
+                repo.set_reply_status(reply_id, ReplyStatus.FAILED, now=now, error=result.detail or None)
+                log.warning("reply %s: send failed (%s)", reply_id, result.detail)
+                return SendOutcome.FAILED
+        except (SQLAlchemyError, InvalidTransition) as e:
+            log.error("reply %s: recording the %s result failed (%s)", reply_id, result.outcome, type(e).__name__)
+            return SendOutcome.IN_DOUBT
+        log.warning("reply %s: send timed out, outcome unknown", reply_id)
+        return SendOutcome.IN_DOUBT
+
+    # The lead's status after a first reply (spec section 4 "Lead status vs send outcome"): only a
+    # sent auto-reply makes the lead "auto_replied". A failed or in-doubt auto-reply flags the lead
+    # and moves it classified -> acknowledged (the staff queue); a failed or in-doubt
+    # acknowledgment only flags it (the lead is already "acknowledged"). Drafts change nothing here:
+    # staff sent them and see the result. InvalidTransition = another writer already moved the lead.
+    # Best effort: a database error here is logged (class name only) and does not hide the send
+    # outcome, which the reply row already records. The flag and the move are tried separately.
+    def _update_lead(self, repo: Repository, lead_id: int, kind: Action, outcome: SendOutcome) -> None:
+        if kind is Action.DRAFT or outcome not in (SendOutcome.SENT, SendOutcome.FAILED, SendOutcome.IN_DOUBT):
+            return
+        if outcome is SendOutcome.SENT:
+            if kind is Action.AUTO_REPLY:
+                self._move_lead(repo, lead_id, LeadStatus.AUTO_REPLIED)
+            return
+        try:
+            repo.flag_for_review(lead_id)
+        except SQLAlchemyError as e:
+            log.error("lead %s: flagging for review failed (%s)", lead_id, type(e).__name__)
+        if kind is Action.AUTO_REPLY:
+            self._move_lead(repo, lead_id, LeadStatus.ACKNOWLEDGED)
+
+    @staticmethod
+    def _move_lead(repo: Repository, lead_id: int, status: LeadStatus) -> None:
+        try:
+            repo.set_lead_status(lead_id, status)
+        except InvalidTransition:
+            log.info("lead %s: not moved to %s, already moved by another writer", lead_id, status)
+        except SQLAlchemyError as e:
+            log.error("lead %s: moving to %s failed (%s)", lead_id, status, type(e).__name__)

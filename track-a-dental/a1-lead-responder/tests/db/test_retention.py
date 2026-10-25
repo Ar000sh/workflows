@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from lead_responder import retention
 from lead_responder.db.models import AuditLog, Lead, LeadStatus, Reply, ReplyStatus
+from lead_responder.limits import mailbox_key
 from lead_responder.repository import Repository
 from lead_responder.router import Action
 
@@ -21,7 +22,8 @@ CUTOFF = NOW - timedelta(days=90)
 def make_lead(repo: Repository, created: datetime, email="anna@example.com", **kw):
     lead, _ = repo.create_lead_if_new(
         name="Anna Test", email=email, phone="0511 123456",
-        message="Ich habe Zahnschmerzen.", consent_at=created, now=created, **kw,
+        message="Ich habe Zahnschmerzen.", consent_at=created, now=created,
+        mailbox_key=mailbox_key(email), **kw,
     )
     return lead
 
@@ -62,8 +64,10 @@ def test_reply_texts_and_dedup_key_are_blanked_too(session):
     r2 = add_reply(repo, lead.id, 2, ReplyStatus.DRAFTED)
     # a failed send may leave the recipient address in `error`
     repo.set_reply_status(r1.id, ReplyStatus.FAILED, now=NOW, error="550 rejected: anna@example.com")
+    repo.set_reply_status(r1.id, ReplyStatus.SENDING, now=NOW)
     repo.set_reply_status(r1.id, ReplyStatus.SENT, now=NOW)
     repo.set_reply_status(r2.id, ReplyStatus.FAILED, now=NOW, error="550 rejected: anna@example.com")
+    repo.set_reply_status(r2.id, ReplyStatus.SENDING, now=NOW)
     repo.set_reply_status(r2.id, ReplyStatus.SENT, now=NOW, error="boom anna@example.com")
     lonely = make_lead(repo, CUTOFF - timedelta(days=2), email="b@example.com")  # no replies
 
@@ -77,6 +81,18 @@ def test_reply_texts_and_dedup_key_are_blanked_too(session):
         assert rep.body == "[anonymized]" and rep.ai_body is None and rep.error is None
         assert rep.status == "sent" and rep.edited is True and rep.kind == "draft"
         assert rep.sent_at == NOW and rep.created_at == NOW
+
+
+# mailbox_key is the normalized address, so it is personal data and goes with the rest.
+def test_retention_blanks_mailbox_key(session):
+    repo = Repository(session)
+    lead = make_lead(repo, CUTOFF - timedelta(days=1))
+    assert lead.mailbox_key == "anna@example.com"  # stored by create_lead_if_new
+
+    assert repo.anonymize_older_than(cutoff=CUTOFF, now=NOW) == 1
+
+    session.expire_all()
+    assert repo.get_lead(lead.id).mailbox_key is None
 
 
 def test_exact_boundary(session):
@@ -314,9 +330,9 @@ def test_error_text_is_stored_for_a_normal_lead(session):
     repo = Repository(session)
     lead = make_lead(repo, NOW - timedelta(days=1))
     reply = add_reply(repo, lead.id, status=ReplyStatus.DRAFTED)
-    repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="timeout: may have been sent")
+    repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=NOW, error="SMTPRecipientsRefused")
     session.expire_all()
-    assert session.get(Reply, reply.id).error == "timeout: may have been sent"
+    assert session.get(Reply, reply.id).error == "SMTPRecipientsRefused"
 
 
 # Two retention jobs started at the same moment (an overlapping schedule, a manual run during the

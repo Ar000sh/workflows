@@ -15,6 +15,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from lead_responder.limits import MAX_EMAIL, MAX_MESSAGE, MAX_NAME, MAX_PHONE
+
 
 class LeadStatus(StrEnum):
     NEW = "new"
@@ -29,6 +31,9 @@ class LeadStatus(StrEnum):
 class ReplyStatus(StrEnum):
     DRAFTED = "drafted"
     APPROVED = "approved"
+    # The claim: a sender moved the reply here BEFORE sending. "sending" means the outcome is
+    # unknown (timeout or crash); "failed" means known not sent.
+    SENDING = "sending"
     SENT = "sent"
     REJECTED = "rejected"
     FAILED = "failed"
@@ -50,16 +55,19 @@ LEAD_TRANSITIONS: dict[LeadStatus, frozenset[LeadStatus]] = {
     LeadStatus.DONE: frozenset(),
 }
 
-# Replies: a draft is approved or rejected by staff; an approved (or system-made) reply is sent or
-# fails; a failed one may be resent or fail again (the new error replaces the old). "drafted" may go
-# straight to sent/failed because acknowledgments and auto-replies need no approval.
-# SENT and REJECTED are final: "sent is final" (spec section 7) is this table.
+# Replies: a draft is approved or rejected by staff. Every send starts with a CLAIM (-> "sending"),
+# which commits before the email goes out; the winner of the claim is the only one who sends, then
+# the reply becomes "sent" or "failed". "drafted" may be claimed directly because acknowledgments
+# and auto-replies need no approval, and may go straight to "failed" (refused before any send).
+# A failed reply is resent by claiming it again. SENT and REJECTED are final: "sent is final"
+# (spec section 7) is this table.
 REPLY_TRANSITIONS: dict[ReplyStatus, frozenset[ReplyStatus]] = {
     ReplyStatus.DRAFTED: frozenset(
-        {ReplyStatus.APPROVED, ReplyStatus.REJECTED, ReplyStatus.SENT, ReplyStatus.FAILED}
+        {ReplyStatus.APPROVED, ReplyStatus.REJECTED, ReplyStatus.SENDING, ReplyStatus.FAILED}
     ),
-    ReplyStatus.APPROVED: frozenset({ReplyStatus.SENT, ReplyStatus.FAILED}),
-    ReplyStatus.FAILED: frozenset({ReplyStatus.SENT, ReplyStatus.FAILED}),
+    ReplyStatus.APPROVED: frozenset({ReplyStatus.SENDING, ReplyStatus.FAILED}),
+    ReplyStatus.SENDING: frozenset({ReplyStatus.SENT, ReplyStatus.FAILED}),
+    ReplyStatus.FAILED: frozenset({ReplyStatus.SENDING}),
     ReplyStatus.SENT: frozenset(),
     ReplyStatus.REJECTED: frozenset(),
 }
@@ -84,10 +92,10 @@ class Lead(Base):
         CheckConstraint(_in_list("status", LeadStatus), name="ck_leads_status"),
         # Length limits as CHECKs (not VARCHAR(n)): an overlong value then raises IntegrityError,
         # the same error family as every other rule, instead of a separate DataError.
-        CheckConstraint("char_length(name) <= 200", name="ck_leads_name_len"),
-        CheckConstraint("char_length(email) <= 254", name="ck_leads_email_len"),
-        CheckConstraint("char_length(phone) <= 50", name="ck_leads_phone_len"),
-        CheckConstraint("char_length(message) <= 10000", name="ck_leads_message_len"),
+        CheckConstraint(f"char_length(name) <= {MAX_NAME}", name="ck_leads_name_len"),
+        CheckConstraint(f"char_length(email) <= {MAX_EMAIL}", name="ck_leads_email_len"),
+        CheckConstraint(f"char_length(phone) <= {MAX_PHONE}", name="ck_leads_phone_len"),
+        CheckConstraint(f"char_length(message) <= {MAX_MESSAGE}", name="ck_leads_message_len"),
         # An index is a sorted lookup list: without one, Postgres reads every row to answer a query.
         # Each one below costs a little on every insert, so only the queries we really run get one.
         # Dashboard lists newest first, and retention asks "older than 90 days" (range on time).
@@ -97,6 +105,9 @@ class Lead(Base):
         # Duplicate detection looks up "same dedup_key in the last 2 minutes": equal key, then a
         # time range. Both columns in one index, so that lookup stays fast on every submission.
         Index("ix_leads_dedup_key_created_at", "dedup_key", "created_at"),
+        # The per-address limit counts "leads with this mailbox_key in the last hour / day": equal
+        # key, then a time range, the same shape as the duplicate lookup above.
+        Index("ix_leads_mailbox_key_created_at", "mailbox_key", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -128,6 +139,14 @@ class Lead(Base):
     # A hash, so we compare without storing a second copy of the text, but it is still derived
     # from personal data, so retention blanks it.
     dedup_key: Mapped[str | None] = mapped_column(Text)
+    # The normalized address (see limits.mailbox_key): "Victim+1@Example.com" and "victim@example.com"
+    # are one mailbox, so the per-address limit cannot be dodged with aliases. It is the email in
+    # disguise, so retention blanks it like dedup_key.
+    mailbox_key: Mapped[str | None] = mapped_column(Text)
+    # True = no email on purpose (set when the per-address limit trips). The sweep tells this apart
+    # from "acknowledgment lost" and skips such leads, so the limit cannot be undone five minutes
+    # later (otherwise a flood of forms could mail-bomb one address).
+    send_suppressed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
 
 class StaffUser(Base):
@@ -148,6 +167,8 @@ class Reply(Base):
     __table_args__ = (
         CheckConstraint(_in_list("kind", REPLY_KINDS), name="ck_replies_kind"),
         CheckConstraint(_in_list("status", ReplyStatus), name="ck_replies_status"),
+        # A counter that went negative would be a bug in the claim; the database refuses it.
+        CheckConstraint("send_attempts >= 0", name="ck_replies_send_attempts"),
         # "All replies of this lead" (replies_for) and, in 4d, "which leads have a drafted reply".
         # lead_id comes first, so it also serves plain lead_id lookups (Postgres does not index
         # foreign keys by itself).
@@ -166,6 +187,11 @@ class Reply(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # NULL = not yet decided; True/False once a human approved the draft (edited or unchanged).
     edited: Mapped[bool | None] = mapped_column(Boolean)
+    # When the current send attempt was claimed, so a sweep can find sends stuck in "sending".
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # How many times this reply was claimed for sending: the sweep stops retrying an
+    # acknowledgment after MAX_SEND_ATTEMPTS. Counted by the claim itself, never by callers.
+    send_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class AuditLog(Base):

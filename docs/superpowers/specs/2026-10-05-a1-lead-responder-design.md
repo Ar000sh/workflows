@@ -96,9 +96,9 @@ Lead saved, flagged `language_unsupported`, treated as sensitive; **DE+EN combin
 Sent immediately (`AUTO_REPLY_MODE=always`, default) or only outside opening hours (`outside_hours`; during opening hours routine leads get the fixed instant acknowledgment (no AI paragraph) and an AI draft for staff to review and send). Auto-replies always include the Doctolib link.
 
 ## 5. Data model
-**`leads`** — `id`, `created_at`, `channel` (`web_form`; later `whatsapp`, `email`), `name`, `email`, `phone` (nullable), `message`, `consent_at`, `category`, `risk`, `urgency`, `language`, `language_unsupported`, `ai_reason`, `needs_manual_review`, `status`, `anonymized_at`, `dedup_key` (added in 4a: sha256 hex of lower-cased email + NUL character (never present in cleaned text) + stripped message, used for duplicate detection; nullable, blanked by retention).
+**`leads`** — `id`, `created_at`, `channel` (`web_form`; later `whatsapp`, `email`), `name`, `email`, `phone` (nullable), `message`, `consent_at`, `category`, `risk`, `urgency`, `language`, `language_unsupported`, `ai_reason`, `needs_manual_review`, `status`, `anonymized_at`, `mailbox_key` and `send_suppressed` (added in 4b: the normalized address for the per-address limit, blanked by retention; and "no email on purpose"), `dedup_key` (added in 4a: sha256 hex of lower-cased email + NUL character (never present in cleaned text) + stripped message, used for duplicate detection; nullable, blanked by retention).
 
-**`replies`** — `id`, `lead_id`, `kind` (`auto_reply` | `acknowledgment` | `draft`), `ai_body`, `body`, `status` (`drafted` | `approved` | `sent` | `rejected` | `failed`), `error`, `approved_by` (→ `staff_users.id`), `sent_at`, `created_at`, `edited` (added in 4a: boolean, nullable; true when staff changed the AI draft, keeps the "approved unchanged" statistic after retention blanks the texts).
+**`replies`** — `id`, `lead_id`, `kind` (`auto_reply` | `acknowledgment` | `draft`), `ai_body`, `body`, `status` (`drafted` | `approved` | `sending` | `sent` | `rejected` | `failed`; `sending` added in 4b: the claim made before a send, meaning "outcome unknown"), `claimed_at` and `send_attempts` (added in 4b: when the current send was claimed, and how many claims there were), `error`, `approved_by` (→ `staff_users.id`), `sent_at`, `created_at`, `edited` (added in 4a: boolean, nullable; true when staff changed the AI draft, keeps the "approved unchanged" statistic after retention blanks the texts).
 
 **`staff_users`** — `id`, `name`, `email`, `password_hash` (argon2), `failed_attempts`, `locked_until`, `created_at`, `disabled_at`.
 
@@ -111,7 +111,22 @@ new → classified ─┬─ routine   → auto_replied ────────
                                                  ├─ approve/edit → replied → done
                                                  └─ reject (handled by phone) → done
 ```
-Added in 4a: this flow, and the reply statuses, are enforced by `LEAD_TRANSITIONS` / `REPLY_TRANSITIONS` in `db/models.py`; the repository changes a status with one conditional UPDATE (`WHERE status IN` the allowed sources) and raises `InvalidTransition` otherwise. Leads from routes 1 and 2 (no draft) go `acknowledged → done`; a classifier failure goes `new → acknowledged`. `sent` and `rejected` replies are final; a `failed` reply may be resent or fail again.
+Added in 4a: this flow, and the reply statuses, are enforced by `LEAD_TRANSITIONS` / `REPLY_TRANSITIONS` in `db/models.py`; the repository changes a status with one conditional UPDATE (`WHERE status IN` the allowed sources) and raises `InvalidTransition` otherwise. Leads from routes 1 and 2 (no draft) go `acknowledged → done`; a classifier failure goes `new → acknowledged`.
+
+Added in 4b (lead side): a routine lead becomes `auto_replied` only after its auto-reply is `sent`; an auto-reply that ends `failed` or stays `sending` moves the lead `classified → acknowledged` and flags it `needs_manual_review` (staff queue). A lead over the per-email limit moves `new → acknowledged` with no reply, flagged and `send_suppressed`. The fallback acknowledgment (deadline, crash, global AI cap, no free pipeline slot, sweep) moves a `new` or `classified` lead to `acknowledged` and flags it.
+
+**Reply status flow (since 4b)**
+```
+drafted ─┬─ approve (staff, 4d) ─► approved ─┐
+         ├─ reject (staff, 4d) ──► rejected (final)
+         ├─ claim (acknowledgment, auto-reply) ──┤
+         └─ refused (no address) ─► failed       ▼
+                                             sending ──┬─ accepted ─────────► sent (final)
+                                                ▲      ├─ known not sent ───► failed
+                                                │      └─ timeout / crash: stays "sending" (outcome unknown)
+                              failed ── claim ──┘  (staff resend in 4d; sweep retry of a stuck acknowledgment)
+```
+`REPLY_TRANSITIONS`: `drafted → {approved, rejected, sending, failed}`, `approved → {sending, failed}`, `sending → {sent, failed}`, `failed → {sending}`; `sent` and `rejected` are final. Every send starts with a **claim** (`→ sending`, which stamps `claimed_at` and counts `send_attempts`), committed before the email goes out, so only one worker can send a reply. `sending` means "outcome unknown", `failed` means "known not sent". There is no `failed → sent`: the only way back from `failed` is a new claim. A staff draft (kind `draft`) can only be claimed from `approved` or `failed` (rule in `ReplyService`, on top of the table). `approved → failed` and `drafted → failed` are the refusal of a send whose lead has no address any more.
 
 `ai_body` vs `body` yields "% drafts approved unchanged"; `created_at` vs `sent_at` yields reply latency. The dashboard shows both.
 
@@ -138,8 +153,13 @@ Added in 4a: this flow, and the reply statuses, are enforced by `LEAD_TRANSITION
 |---|---|
 | Any AI call fails | Lead already saved **before** AI calls; **retry up to 3 times** (4 attempts total) with exponential backoff (1s, 2s, 4s), each attempt logged; then safety default (sensitive + manual review) |
 | Safe-info paragraph fails or fails guardrails | Dropped; template acknowledgment sent alone |
-| Send call returns an error (provider unreachable, connection refused, auth error, 5xx) | Nothing left our system, so resending is safe: **retry up to 3 times** with exponential backoff (1s, 2s, 4s). If all fail → reply `failed` with `error`; dashboard shows a **Resend** button |
-| Send call times out (no answer) | Outcome unknown, so the email may already have been sent. **No automatic retry** (avoids double emails) → reply `failed` with `error = "timeout: may have been sent"`; staff decide via **Resend** |
+| Send call returns an error (provider unreachable, connection refused, auth error, 5xx, or the server refuses the message or recipient) | Nothing was accepted, so resending is safe: the sender **retries up to 3 times** with exponential backoff (1s, 2s, 4s). If all fail → reply `failed` with `error` (the exception class name only, never its text: providers repeat the address); dashboard shows a **Resend** button (4d) |
+| Send call times out, or the connection drops while the message is handed over (amended in 4b) | Outcome unknown, so the email may already have been sent. The sender never retries it; the reply **stays `sending`** (not `failed`). **Acknowledgments:** the sweep (`run_sweep`) resends one stuck longer than `SENDING_TIMEOUT_MINUTES` (default 10), moving it `sending → failed` (fixed error text `stuck: retried by sweep`; it holds no personal data, so it is written even when the lead is already anonymized) and claiming it again, at most `MAX_SEND_ATTEMPTS` (default 3) claims in all; then it waits for staff. If the re-send raises or the process dies after the move to `failed`, the next sweep resends it (it is `failed` with exactly that text, below the cap). A duplicate acknowledgment is harmless. **Drafts and auto-replies:** never resent automatically (a duplicate medical reply is not harmless); staff check delivery and resolve them in 4d (`sending → sent` or `sending → failed`, then Resend); the sweep flags a lead whose auto-reply is stuck longer than `SENDING_TIMEOUT_MINUTES` so staff see it |
+| One sweep item raises (database blip, bug) | Logged with class name and id only, its lead flagged, counted in `SweepResult.errors`; the sweep goes on with the next item and `run_sweep` exits with code 1 so a scheduler can alert |
+| Process dies mid-send | Same as a timeout: the reply stays `sending` |
+| First reply written but never claimed (the writer died, or the database failed before the send) | The sweep sends acknowledgments and auto-replies still `drafted` after `NO_REPLY_SWEEP_MINUTES` (default 5); never a staff draft |
+| Lead saved, but no first reply (process died, pipeline crashed) | The sweep gives leads older than `NO_REPLY_SWEEP_MINUTES` with no first reply the fixed DE+EN acknowledgment and flags them; a `send_suppressed` lead is skipped |
+| Lead anonymized (or email empty) before the send | Nothing is sent; the reply moves to `failed` with no error text (a reply that is already `failed`, such as a stuck acknowledgment the sweep gave up, keeps its fixed text above) |
 | Provider accepted the email | Reply `sent`, final. **Never resent automatically** |
 | Duplicate submission (same email + message within 2 min) | Ignored, returns success to the form |
 | Missing consent / invalid email | Form validation error, nothing stored |
@@ -196,13 +216,13 @@ Written before building layer 4. Status: **design** = handled by the design belo
 | 2 | Hostile text breaks the database (NUL byte, SQL quotes, emoji, huge fields) | NUL stripped, parameterized SQL only, `CHECK` length limits as a last defence | 4a | done (4a) |
 | 3 | Personal data survives retention (reply bodies repeat the name, ids only half cleaned) | Anonymization also blanks `replies.body`/`ai_body`; an `edited` flag keeps the "approved unchanged" statistic; idempotent; exact 90-day boundary tested; also `leads.ai_reason`, `leads.dedup_key` and `replies.error` | 4a | done (4a) |
 | 4 | Naive or wrong-timezone timestamps | Only timezone-aware datetimes accepted; `timestamptz` columns | 4a | done (4a) |
-| 5 | Database down or slow when a lead arrives | Intake returns an error to the form; no half-saved state; nothing sent | 4b | test |
-| 6 | Lead saved, then the process dies mid-pipeline | Status stays `new`/`classified`; a startup sweep re-queues leads with no reply after N minutes | 4b | test |
-| 7 | Any exception (not only LLMError) in the pipeline leaves the patient without a response | Handler wraps `process_inquiry`; any exception sends the route-1 acknowledgment and flags the lead | 4b | test |
-| 8 | The "instant" acknowledgment waits for slow AI calls (worst case ~13 min) | Send the fixed acknowledgment first, then do the AI calls, with an overall deadline | 4b | test |
-| 9 | Form abused: huge body, no consent, invalid email, hostile name, flood from one source | Size caps, consent and email validation, `sanitize_name`, duplicate window, per-IP and per-email rate limit | 4b | test |
-| 10 | The form becomes a mail relay (stranger's address + attacker text) | Reply goes only to the form's email address, text is guardrailed final text, rate limit per address and per day | 4b | test |
-| 11 | Email sent twice, or never recorded as sent | Typed sender result (`accepted`/`failed`/`timeout`), no auto-retry after a timeout, `sent` is final (spec §7; the rule itself is built and tested in 4a: `REPLY_TRANSITIONS` plus the conditional UPDATE; the sender must use `set_reply_status` and handle `InvalidTransition`) | 4b | test |
+| 5 | Database down or slow when a lead arrives | Intake returns a generic `503` to the form; no half-saved state; nothing sent | 4b | done (4b) |
+| 6 | Lead saved, then the process dies mid-pipeline | Status stays `new`/`classified`; the scheduled sweep (`run_sweep`) gives leads with no first reply after `NO_REPLY_SWEEP_MINUTES` the fixed acknowledgment, and sends first replies left `drafted` | 4b | done (4b) |
+| 7 | Any exception (not only LLMError) in the pipeline leaves the patient without a response | `IntakeService.process` wraps `process_inquiry`; any exception sends the route-1 acknowledgment and flags the lead | 4b | done (4b) |
+| 8 | The "instant" acknowledgment waits for slow AI calls (worst case ~13 min) | The form is answered at once; the pipeline runs in the background under an overall deadline (45 s), after which the fixed acknowledgment goes out and a late result is discarded | 4b | done (4b) |
+| 9 | Form abused: huge body, no consent, invalid email, hostile name, flood from one source | Body-size limit (`413`), field caps, consent and email validation, `sanitize_name`, duplicate window, per-email rate limit on the normalized mailbox, global hourly AI cap. Per-IP limits stay deferred (§12) | 4b | done (4b), per-IP parked |
+| 10 | The form becomes a mail relay (stranger's address + attacker text) | Reply goes only to the form's email address, text is guardrailed final text or the fixed template, fixed subject, per-email limit per hour and per day (over it: no email at all). A global cap on emails per hour is parked (4b probe P4) | 4b | done (4b), P4 parked |
+| 11 | Email sent twice, or never recorded as sent | Claim before send (`→ sending` commits before the email leaves; one winner), typed sender result (`accepted`/`failed`/`timeout`), a timeout leaves the reply `sending` (outcome unknown): only acknowledgments are resent automatically, by the sweep and capped at `MAX_SEND_ATTEMPTS`; drafts and auto-replies wait for staff; `sent` is final (§5, §7) | 4b | done (4b) |
 | 12 | Login brute force, user enumeration, stolen session | argon2, lockout 5/15 min, generic error, signed cookie 8 h, secure flags | 4c | test |
 | 13 | A staff action is not attributable | Every approve/edit/reject/resend/login writes an audit row in the same transaction | 4c | test |
 | 14 | XSS or injection through patient text on the dashboard | Jinja autoescape stays ON, no `|safe`, CSP header | 4d | test |
@@ -210,6 +230,6 @@ Written before building layer 4. Status: **design** = handled by the design belo
 | 16 | Two staff edit or send the same draft at once | Status check inside the transaction (only `drafted` can be approved); the conditional UPDATE in `set_reply_status` is built and tested in 4a, the approve action in 4d must call it and show `InvalidTransition` as "already handled" | 4d | test |
 | 17 | A sensitive lead waits unnoticed | Sensitive queue first, drafts over `APPROVAL_WARN_HOURS` highlighted, route-1/2 leads flagged `needs_manual_review` | 4d | design |
 | 18 | Demo site posts to the wrong place or leaks the API key | Static page only knows the form URL; no secrets in the page | 4e | design |
-| 19 | Cost abuse (unlimited AI calls from one actor) | Rate limits (#9) plus a daily AI call cap per instance | 4b | parked until a client deployment |
-| 20 | Redactor, guardrail and keyword-net gaps from the attack report | See "Parked" in `REVIEW.md` | n/a | parked |
+| 19 | Cost abuse (unlimited AI calls from one actor) | Rate limits (#9) plus a global cap on AI-processed leads per hour (`MAX_AI_LEADS_PER_HOUR`, built in 4b; above it the fixed acknowledgment, no AI) | 4b | done (4b, hourly cap); a daily cap parked until a client deployment |
+| 20 | Redactor, guardrail and keyword-net gaps from the attack report | See "Parked" in `review/layers-1-3.md` | n/a | parked |
 

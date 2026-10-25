@@ -18,9 +18,23 @@ def test_final_statuses_have_no_exit():
     assert LEAD_TRANSITIONS[LeadStatus.DONE] == frozenset()
 
 
-# Nothing moves to its own status except a failed reply (a failed resend writes the new error).
-def test_only_failed_replies_may_repeat_their_status():
-    for status, targets in REPLY_TRANSITIONS.items():
-        assert (status in targets) == (status is ReplyStatus.FAILED)
-    for status, targets in LEAD_TRANSITIONS.items():
-        assert status not in targets
+# The reply table written out pair by pair (6 x 6): the claim "-> sending" is the only way to a send,
+# and a failed reply can only be claimed again, never marked sent or failed directly.
+def test_reply_transitions_are_exactly_these():
+    S = ReplyStatus
+    allowed = {
+        (S.DRAFTED, S.APPROVED), (S.DRAFTED, S.REJECTED), (S.DRAFTED, S.SENDING), (S.DRAFTED, S.FAILED),
+        (S.APPROVED, S.SENDING), (S.APPROVED, S.FAILED),
+        (S.SENDING, S.SENT), (S.SENDING, S.FAILED),
+        (S.FAILED, S.SENDING),
+    }
+    for old in S:
+        for new in S:
+            assert (new in REPLY_TRANSITIONS[old]) == ((old, new) in allowed), (old, new)
+
+
+# Nothing moves to its own status, for leads or replies (a failed resend goes through "sending").
+def test_no_status_repeats_itself():
+    for table in (REPLY_TRANSITIONS, LEAD_TRANSITIONS):
+        for status, targets in table.items():
+            assert status not in targets

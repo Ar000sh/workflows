@@ -68,3 +68,9 @@ def session(engine):
         conn.execute(text("TRUNCATE leads, replies, staff_users, audit_log RESTART IDENTITY CASCADE"))
     with Session(engine, expire_on_commit=False) as s:
         yield s
+
+
+# The Alembic config for the test database, for tests that move the schema between revisions.
+@pytest.fixture
+def alembic_cfg(engine):
+    return alembic_config(config.DATABASE_URL_TEST)

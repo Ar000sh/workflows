@@ -32,6 +32,22 @@ _TEXTS = {
 }
 
 
+# Email subjects: fixed text per language, never AI output or form input, so nothing a patient
+# types can reach a mail header. Only the practice name (our own config) is filled in.
+_SUBJECTS = {
+    "de": "Ihre Anfrage an die {practice_name}",
+    "en": "Your inquiry to {practice_name}",
+}
+_SUBJECT_BILINGUAL = "Ihre Anfrage / Your inquiry: {practice_name}"
+
+
+# The subject for a reply in `language`. "de+en", None and any language without its own text
+# (e.g. a Turkish lead that got the combined acknowledgment) get the bilingual subject: unlike
+# acknowledgment(), this never raises, because a send must not fail over its subject line.
+def subject(language: str | None, practice: Practice) -> str:
+    return _SUBJECTS.get(language, _SUBJECT_BILINGUAL).format(practice_name=practice.name)
+
+
 def acknowledgment(
     language: str,
     *,

@@ -1,0 +1,226 @@
+"""Read queries for the 4b limits and sweep: recent-lead counts, stuck sends, leads with no first reply."""
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy.orm import Session
+
+from lead_responder.db.models import LeadStatus, ReplyStatus
+from lead_responder.limits import mailbox_key
+from lead_responder.repository import Repository
+from lead_responder.router import Action
+
+NOW = datetime(2026, 10, 24, 10, 0, tzinfo=UTC)
+HOUR_AGO = NOW - timedelta(hours=1)
+
+
+def make_lead(repo: Repository, email="anna@example.com", message="Ich habe Zahnschmerzen.", now=NOW):
+    lead, _ = repo.create_lead_if_new(
+        name="Anna Test", email=email, phone=None, message=message,
+        consent_at=now, now=now, mailbox_key=mailbox_key(email),
+    )
+    return lead
+
+
+# --- counts for the per-address and global limits ---
+
+# The limit is checked AFTER the lead is saved, so the new lead counts itself ("including the new
+# lead itself", spec section 6). Aliases of one mailbox count together, other mailboxes do not.
+def test_count_includes_the_new_lead_itself(session):
+    repo = Repository(session)
+    make_lead(repo, email="Victim+1@Example.com")
+    assert repo.count_leads_for_mailbox_since("victim@example.com", HOUR_AGO) == 1
+    make_lead(repo, email="victim+2@example.com", message="anders")
+    make_lead(repo, email="someone@example.com")
+    assert repo.count_leads_for_mailbox_since("victim@example.com", HOUR_AGO) == 2
+    assert repo.count_leads_since(HOUR_AGO) == 3
+    assert not session.in_transaction()
+
+
+# Two forms for one mailbox at the same moment: each saves its lead, then counts. Both must see
+# both leads (2), so a flood cannot slip under the limit by arriving in parallel.
+def test_two_simultaneous_leads_for_one_mailbox_both_count_two(engine, session):
+    barrier_save = threading.Barrier(2)
+    barrier_count = threading.Barrier(2)
+
+    def submit(i):
+        with Session(engine, expire_on_commit=False) as s:
+            repo = Repository(s)
+            barrier_save.wait(timeout=5)
+            make_lead(repo, email=f"victim+{i}@example.com", message=f"Nachricht {i}")
+            barrier_count.wait(timeout=5)
+            return repo.count_leads_for_mailbox_since("victim@example.com", HOUR_AGO)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert list(pool.map(submit, range(2))) == [2, 2]
+
+
+# The window is "created_at >= since": a lead exactly at the boundary is counted, one a
+# microsecond older is not. (Same choice for both counts.)
+def test_counts_respect_since_boundary(session):
+    repo = Repository(session)
+    make_lead(repo, email="a@example.com", now=HOUR_AGO)
+    make_lead(repo, email="a@example.com", message="older", now=HOUR_AGO - timedelta(microseconds=1))
+    assert repo.count_leads_for_mailbox_since("a@example.com", HOUR_AGO) == 1
+    assert repo.count_leads_since(HOUR_AGO) == 1
+    assert repo.count_leads_since(HOUR_AGO - timedelta(microseconds=1)) == 2
+
+
+# --- sweep part 1: sends stuck in "sending" ---
+
+def _reply(repo, lead_id, kind, *, claims=0, claimed_at=NOW):
+    reply = repo.add_reply(lead_id, kind=kind, ai_body=None, body="x", status=ReplyStatus.DRAFTED, now=NOW)
+    for n in range(claims):
+        if n:
+            repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=claimed_at, error="SMTPException")
+        repo.set_reply_status(reply.id, ReplyStatus.SENDING, now=claimed_at)
+    return reply
+
+
+def test_stuck_sending_replies_filters_kind_age_and_attempts(session):
+    repo = Repository(session)
+    old, young = NOW - timedelta(minutes=11), NOW - timedelta(minutes=9)
+    cutoff = NOW - timedelta(minutes=10)
+    lead = make_lead(repo)
+    stuck = _reply(repo, lead.id, Action.ACKNOWLEDGMENT, claims=1, claimed_at=old)
+    stuck_twice = _reply(repo, lead.id, Action.ACKNOWLEDGMENT, claims=2, claimed_at=old)
+    _reply(repo, lead.id, Action.ACKNOWLEDGMENT, claims=3, claimed_at=old)  # at the attempt cap
+    _reply(repo, lead.id, Action.ACKNOWLEDGMENT, claims=1, claimed_at=young)  # still within the timeout
+    _reply(repo, lead.id, Action.ACKNOWLEDGMENT, claims=1, claimed_at=cutoff)  # exactly at it: strictly older only
+    _reply(repo, lead.id, Action.DRAFT, claims=1, claimed_at=old)  # drafts are never retried automatically
+    _reply(repo, lead.id, Action.ACKNOWLEDGMENT)  # drafted, never claimed
+    sent = _reply(repo, lead.id, Action.ACKNOWLEDGMENT, claims=1, claimed_at=old)
+    repo.set_reply_status(sent.id, ReplyStatus.SENT, now=old)
+
+    found = repo.stuck_sending_replies(kind=Action.ACKNOWLEDGMENT, claimed_before=cutoff, max_attempts=3)
+    assert [r.id for r in found] == [stuck.id, stuck_twice.id]
+    drafts = repo.stuck_sending_replies(kind=Action.DRAFT, claimed_before=cutoff, max_attempts=3)
+    assert len(drafts) == 1 and drafts[0].kind == "draft"
+    assert not session.in_transaction()
+
+
+# --- sweep part 2: leads that never got a first reply ---
+
+def test_leads_without_first_reply_skips_suppressed_replied_and_young_leads(session):
+    repo = Repository(session)
+    old = NOW - timedelta(minutes=6)
+    cutoff = NOW - timedelta(minutes=5)
+
+    def lead(name, now=old):
+        return make_lead(repo, email=f"{name}@example.com", now=now)
+
+    lost_new = lead("new")
+    lost_classified = lead("classified")
+    repo.set_lead_status(lost_classified.id, LeadStatus.CLASSIFIED)
+    lost_acknowledged = lead("acknowledged")
+    repo.set_lead_status(lost_acknowledged.id, LeadStatus.ACKNOWLEDGED)
+    with_draft_only = lead("draftonly")  # a staff draft is not a first reply
+    repo.add_reply(with_draft_only.id, kind=Action.DRAFT, ai_body=None, body="x", status=ReplyStatus.DRAFTED, now=old)
+
+    lead("young", now=NOW - timedelta(minutes=4))
+    lead("edge", now=cutoff)  # exactly at the cutoff: strictly older only
+    repo.suppress_lead(lead("suppressed").id)
+    repo.acknowledge_lead(lead("acked").id, kind=Action.ACKNOWLEDGMENT, ai_body=None, body="x", now=old)
+    auto = lead("auto")
+    repo.set_lead_status(auto.id, LeadStatus.CLASSIFIED)
+    repo.acknowledge_lead(auto.id, kind=Action.AUTO_REPLY, ai_body="x", body="x", now=old)
+    done = lead("done")
+    for status in (LeadStatus.ACKNOWLEDGED, LeadStatus.DONE):
+        repo.set_lead_status(done.id, status)
+    anonymized = make_lead(repo, email="anon@example.com", now=NOW - timedelta(days=100))
+    repo.anonymize_older_than(cutoff=NOW - timedelta(days=90), now=NOW)
+
+    found = repo.leads_without_first_reply(created_before=cutoff)
+    assert not session.in_transaction()
+    assert [ld.id for ld in found] == [
+        lost_new.id, lost_classified.id, lost_acknowledged.id, with_draft_only.id,
+    ]
+    assert anonymized.id not in [ld.id for ld in found]
+
+
+# --- sweep part 1b: first replies written but never claimed ---
+
+# Acknowledgments and auto-replies still "drafted" and created strictly before the cutoff (a reply
+# exactly at the cutoff waits for the next sweep, as in part 2). Never a staff draft (those wait
+# for approval), never a reply already claimed or sent, never one of an anonymized lead.
+def test_stale_drafted_first_replies_filters_kind_status_age_and_anonymized(session):
+    repo = Repository(session)
+    old = NOW - timedelta(minutes=6)
+    cutoff = NOW - timedelta(minutes=5)
+
+    def first_reply(name, kind=Action.ACKNOWLEDGMENT, now=old):
+        lead = make_lead(repo, email=f"{name}@example.com", now=now)
+        if kind is Action.AUTO_REPLY:
+            repo.set_lead_status(lead.id, LeadStatus.CLASSIFIED)
+        return repo.acknowledge_lead(lead.id, kind=kind, ai_body=None, body="x", now=now)
+
+    stale_ack = first_reply("ack")
+    stale_auto = first_reply("auto", kind=Action.AUTO_REPLY)
+    first_reply("young", now=NOW - timedelta(minutes=4))
+    first_reply("edge", now=cutoff)
+    claimed = first_reply("claimed")
+    repo.set_reply_status(claimed.id, ReplyStatus.SENDING, now=old)
+    staff = make_lead(repo, email="staff@example.com", now=old)
+    repo.add_reply(staff.id, kind=Action.DRAFT, ai_body=None, body="x", status=ReplyStatus.DRAFTED, now=old)
+    anonymized_lead = make_lead(repo, email="anon@example.com", now=NOW - timedelta(days=100))
+    repo.acknowledge_lead(anonymized_lead.id, kind=Action.ACKNOWLEDGMENT, ai_body=None, body="x", now=NOW - timedelta(days=100))
+    repo.anonymize_older_than(cutoff=NOW - timedelta(days=90), now=NOW)
+
+    found = repo.stale_drafted_first_replies(created_before=cutoff)
+    assert not session.in_transaction()
+    assert [r.id for r in found] == [stale_ack.id, stale_auto.id]
+
+
+# --- sweep part 1, second list: acknowledgments the sweep itself left "failed" ---
+
+# Only replies of the kind, status "failed", with exactly the given error text, claimed strictly
+# before the cutoff and below the attempt cap. A failed reply with another error is for staff.
+def test_failed_stuck_replies_filters_kind_error_age_and_attempts(session):
+    repo = Repository(session)
+    old, cutoff = NOW - timedelta(minutes=11), NOW - timedelta(minutes=10)
+    stuck_text = "stuck: retried by sweep"
+    lead = make_lead(repo)
+
+    def failed(kind=Action.ACKNOWLEDGMENT, *, claims=1, claimed_at=old, error=stuck_text):
+        reply = _reply(repo, lead.id, kind, claims=claims, claimed_at=claimed_at)
+        repo.set_reply_status(reply.id, ReplyStatus.FAILED, now=claimed_at, error=error)
+        return reply
+
+    wanted = failed()
+    twice = failed(claims=2)
+    failed(claims=3)  # at the attempt cap
+    failed(claimed_at=cutoff)  # exactly at the cutoff: strictly older only
+    failed(error="SMTPRecipientsRefused")  # staff resend this one
+    failed(kind=Action.DRAFT)  # drafts are never retried automatically
+    _reply(repo, lead.id, Action.ACKNOWLEDGMENT, claims=1, claimed_at=old)  # still "sending"
+
+    found = repo.failed_stuck_replies(
+        kind=Action.ACKNOWLEDGMENT, error=stuck_text, claimed_before=cutoff, max_attempts=3,
+    )
+    assert [r.id for r in found] == [wanted.id, twice.id]
+    assert not session.in_transaction()
+
+
+# --- M-2: leads whose reply of one kind is stuck in "sending" and that are not flagged yet ---
+
+def test_unflagged_leads_with_stuck_replies_filters_kind_age_and_flag(session):
+    repo = Repository(session)
+    old, cutoff = NOW - timedelta(minutes=11), NOW - timedelta(minutes=10)
+
+    def lead_with(name, kind=Action.AUTO_REPLY, claimed_at=old):
+        lead = make_lead(repo, email=f"{name}@example.com")
+        _reply(repo, lead.id, kind, claims=1, claimed_at=claimed_at)
+        return lead
+
+    wanted = lead_with("stuck")
+    lead_with("young", claimed_at=NOW - timedelta(minutes=9))
+    lead_with("edge", claimed_at=cutoff)
+    lead_with("ack", kind=Action.ACKNOWLEDGMENT)
+    repo.flag_for_review(lead_with("flagged").id)
+    done = lead_with("sent")
+    [sent] = repo.replies_for(done.id)
+    repo.set_reply_status(sent.id, ReplyStatus.SENT, now=old)
+
+    found = repo.unflagged_leads_with_stuck_replies(kind=Action.AUTO_REPLY, claimed_before=cutoff)
+    assert [ld.id for ld in found] == [wanted.id]
+    assert not session.in_transaction()
