@@ -24,6 +24,7 @@ description: Find edge cases and failure modes in two modes. PLAN mode (at desig
 - **Word lists and patterns:** phrases that should trigger and phrases that must not; check against real eval data.
 - **Docs vs code:** every claim in the README, spec and comments about behaviour (retries, limits, names) checked against the code.
 - **Duplicates, repeats, concurrency (layer 4+):** same request twice, two at once, replays, a retry after a timeout.
+- **Illegal states (any status or enum column):** write down which combinations of status and kind (or status and flag) must never exist. Can the schema represent them anyway? If a service has to re-check what the status should already say, the status is carrying two meanings: split it, and enforce the impossible pairs with a CHECK. For multi-step writes: what does the database hold if the process dies between two commits, and does a sweep exist only to repair that? Prefer one transaction.
 - **Money and abuse:** can one visitor trigger unlimited AI calls? Is there a cost cap?
 
 ## PLAN mode (design time, no code)

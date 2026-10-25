@@ -20,6 +20,7 @@ Table: decision, choice, why. Mark which were Tariq's and which are Claude's cal
 ## 5. Architecture and components
 Diagram, one responsibility per unit, what each depends on.
 If the project has an API and a database, say where each rule lives (a common layering): the API validates input; a service holds the business rules; the repository is database access (queries, locks and its own commit: one method = one transaction); the database enforces hard limits. Choose where the commit lives (repository, or a service that commits once over several repository calls = unit of work, needed when several writes must be atomic) and say why. A rule that lives in two layers needs a stated reason.
+For every status or enum column: list the allowed moves AND the combinations that must never exist (for example kind x status), and enforce the impossible ones in the database (CHECK). A status that means two things (a staff draft and a system reply both "drafted") forces every caller to re-check, so split it. Several writes that must go together belong in one repository method, one transaction. Then run `/design-review` on this draft (independent agent; skip for simple CRUD) and record its outcome in section 4.
 
 ## 6. Data and flows
 Data model, what is sent to the AI (minimized), retention.
@@ -45,10 +46,10 @@ Which model per task, effort, thinking on/off, and the evidence or the experimen
 Unit tests, eval set (who reviews the labels), safety targets (usually 0), what is read by hand, and and the planned `/edge-case-probe` attack pass by a fresh agent after the build.
 
 ## 12. Build layers
-Layer, concepts learned, done when.
+Layer, concepts learned, done when. The last task of each layer is the demo script: it runs the real stack (real AI call, real mail path into Mailpit or a sandbox), asks before spending, and prints what happened, so Tariq sees real behaviour before his review.
 
 ## 13. Definition of done
-Runs end-to-end from the README, tests pass, eval scores recorded, README and spec match the code, demo script or video, `REVIEW.md` closed out.
+Runs end-to-end from the README, tests pass, eval scores recorded, README and spec match the code, demo script (real stack) or video, status diagrams match the code, `REVIEW.md` closed out.
 
 ## 14. Out of scope
 Explicit list, so ideas have a parking place.

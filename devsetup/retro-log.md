@@ -2,6 +2,24 @@
 
 > One entry per `/retro`. Newest first. Records what we found, where each finding went, and what we decided not to do, so the next retro can check whether it helped.
 
+## 2026-10-25: A1 layer 4b (third retro, read from the skill text and run as a conversation)
+**Trigger:** 4b built, merged with the attack pass still open, then an independent design review found two real flaws. **Result:** 10 findings, 6 built (1, 2, 3, 4, 5, 8), 4 waiting or dropped.
+
+| # | Finding | Went to | Notes |
+|---|---|---|---|
+| 1 | A status model that allows illegal states breeds patches (`drafted` meant two things; five patches followed) | spec template section 5 + `edge-case-probe` checklist bullet "Illegal states" | Scope: any project with status columns |
+| 2 | Run an independent complexity review at spec time, not after the build | new skill `/design-review` (+ `reviewer-prompt.md`), called from CLAUDE.md "Before writing a plan" | Tariq asked for a skill rather than a loose prompt; skip for simple CRUD |
+| 3 | Rulings taken on Tariq's behalf were reviewed too late; three touched statuses or patient-visible results | CLAUDE.md "Who decides what" | Tariq: make it generic so it applies to other projects |
+| 4 | No demo script on the real stack when the build ended | CLAUDE.md definition of done + spec template build layers | Real AI call, asks before spending; exists before the review starts |
+| 5 | Reviews need flow diagrams; one file per layer | CLAUDE.md review rule (Mermaid), `review/` split, `status-flows.md` | Built during the session |
+| 6 | Pre-commit gate: 35-60 s, once 91 s (limit 90) | waiting | Tariq decides after Task 5 of the refactor re-measures |
+| 7 | Subagent hygiene: forbid `git stash`, `reset --hard`, `checkout --` in dispatch rules | waiting | Not answered; the refactor plan's Global Constraints already say it |
+| 8 | Fresh-agent review beats implementer tests on money and irreversible paths | CATALOG evidence row only | Duplicate email, stranded replies, personal data in logs |
+| 9 | Merged with the attack pass and part of the review still open | dropped | One occurrence; PROJECT.md records the open gates |
+| 10 | Long sessions (compaction once); Opus use for design review | later | Needs measured data for `model-choice.md` |
+
+**Follow-ups:** at the next layer check (a) whether the demo script existed before the review, (b) whether `/design-review` ran on the spec and what it found, (c) whether any ruling touching a status table or a patient-visible result was taken without asking, (d) the gate time after the refactor (Task 5 of the refactor plan), (e) the previous follow-up "gate under half the limit" failed in 4b (35-60 s, once 91 s).
+
 ## 2026-10-24: A1 layer 4a (first run of `/retro`)
 **Trigger:** 4a built, reviewed and attacked twice. **Result:** 10 findings, 5 built, 1 waiting for Tariq, 4 dropped.
 

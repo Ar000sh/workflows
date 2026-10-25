@@ -24,6 +24,7 @@ Thumbs.db
 !.claude/skills/edge-case-probe/
 !.claude/skills/run-evals/
 !.claude/skills/retro/
+!.claude/skills/design-review/
 
 # Eval outputs (read locally, summarized in READMEs)
 eval_runs/
